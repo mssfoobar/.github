@@ -1,0 +1,5 @@
+{
+    "name": "Build & Deploy Module's Web Console",
+    "description": "The workflow template for building and deploying a module's web console.",
+    "iconName": "octicon browser"
+}
