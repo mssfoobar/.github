@@ -1,5 +1,6 @@
 # AGIL Ops Hub
 
-More information coming soon!
+AGIL Ops Hub is a development platform for command and control systems with many out-of-the-box
+capabilities.
 
-![alt text](logo.png)
+Pleaase visit the [official documentation](https://mssfoobar.github.io/docs/) site to learn more!
