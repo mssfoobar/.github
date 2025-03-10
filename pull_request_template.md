@@ -1,13 +1,10 @@
-<!--
-Please fill in the following information before submitting your pull request:
+<!-- Please fill in the following information before submitting your pull request: -->
+## Description
+
+<!-- 
+  If this pull request is linked to an issue on Linear, please use the magic word link:
+  https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/configuring-autolinks-to-reference-external-resources
 -->
+Linear Issues:
 
-## 📑 Description
-
-<!-- If this pull request is linked to an issue on Linear, please use the magic word link:  -->
-
-AOH-<!-- Issue Number ->
-
-<!-- Add a brief description of the pr -->
-
-## ✅ Checks
+- AOH-<Issue-Number>
