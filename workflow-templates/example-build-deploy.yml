@@ -1,0 +1,88 @@
+## TODO: WORKING TESTED EXAMPLE!!
+
+# # This is an example workflow that demonstrates how to use the reusable workflows
+# # for building/pushing Docker images and updating deployment manifests.
+# # Copy and customize this file for your specific application needs.
+
+# name: Build and Deploy Example
+
+# # Define when this workflow should run
+# on:
+#   # Trigger on pushes to main or dev branches
+#   push:
+#     branches:
+#       - main
+#       - dev
+
+#   # Trigger on pull requests to main
+#   pull_request:
+#     branches:
+#       - main
+
+#   # Allow manual triggering from the GitHub Actions tab
+#   workflow_dispatch:
+
+# # Define environment variables used throughout the workflow
+# env:
+#   # Organization name - change this to your organization
+#   ORG_NAME: example-org
+
+#   # Application name - change this to your application
+#   APP_NAME: web-service
+
+#   # Image prefix for Docker image naming
+#   IMAGE_PREFIX: ghcr.io
+
+#   # Build context - directory containing Dockerfile
+#   BUILD_CONTEXT: .
+
+#   # Deployment manifest repository information
+#   MANIFEST_REPO: example-org/manifests
+#   MANIFEST_BRANCH: main
+#   MANIFEST_PATH: deployments/web-service
+
+# # Define the jobs in this workflow
+# jobs:
+#   # First job: build and push the Docker image
+#   build-image:
+#     name: Build and Push Docker Image
+#     # Use the reusable workflow for Docker build and push
+#     uses: ./.github/workflows/docker-build-push.yml
+#     with:
+#       # Pass the required inputs to the reusable workflow
+#       image_prefix: ${{ env.IMAGE_PREFIX }}
+#       org_name: ${{ env.ORG_NAME }}
+#       app_name: ${{ env.APP_NAME }}
+#       build_context: ${{ env.BUILD_CONTEXT }}
+#     secrets:
+#       # Pass the GitHub token for authentication
+#       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+#   # Second job: update deployment manifests
+#   update-deployment:
+#     name: Update Deployment Manifests
+#     # This job depends on the build-image job
+#     needs: build-image
+#     # Only run this job on main branch or when manually triggered
+#     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+#     # Use the reusable workflow for updating deployment manifests
+#     uses: ./.github/workflows/update-deployment.yml
+#     with:
+#       # Pass the required inputs to the reusable workflow
+#       org_name: ${{ env.ORG_NAME }}
+#       manifest_repo: ${{ env.MANIFEST_REPO }}
+#       manifest_branch: ${{ env.MANIFEST_BRANCH }}
+#       manifest_path: ${{ env.MANIFEST_PATH }}
+#       # Use the output from the previous job as the new image tag
+#       new_image_tag: ${{ needs.build-image.outputs.image_tag }}
+#     secrets:
+#       # Pass the required secrets for deployment
+#       DEPLOYMENT_APP_ID: ${{ vars.DEPLOYMENT_APP_ID }}
+#       DEPLOYMENT_APP_PRIVATE_KEY: ${{ secrets.DEPLOYMENT_APP_PRIVATE_KEY }}i
+# # The workflow showcases:
+# # 1. How to call both reusable workflows in sequence
+# # 2. How to pass inputs and environment variables to reusable workflows
+# # 3. How to pass outputs from one workflow to another
+# # 4. How to conditionally execute the deployment job
+# # 5. How to pass secrets securely to reusable workflows
+

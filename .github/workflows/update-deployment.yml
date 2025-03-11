@@ -1,0 +1,89 @@
+name: Update Deployment Manifest
+
+on:
+    workflow_call:
+        inputs:
+            org_name:
+                required: true
+                type: string
+                description: "GitHub organization name"
+            manifest_repo:
+                required: true
+                type: string
+                description: "Repository containing the deployment manifests"
+            manifest_branch:
+                required: true
+                type: string
+                description: "Branch in the manifest repository to update"
+            manifest_path:
+                required: true
+                type: string
+                description: "Path to the manifest file within the repository"
+            new_image_tag:
+                required: true
+                type: string
+                description: "New image tag to be updated in the manifest"
+        secrets:
+            DEPLOYMENT_APP_ID:
+                required: true
+                description: "GitHub App ID for deployment"
+            DEPLOYMENT_APP_PRIVATE_KEY:
+                required: true
+                description: "GitHub App Private Key for deployment"
+
+jobs:
+    update-manifest:
+        name: Update Deployment Manifest
+        runs-on: ubuntu-latest
+        steps:
+            - name: Generate GitHub App Token
+              uses: actions/create-github-app-token@v1
+              id: app-token
+              with:
+                  app-id: ${{ secrets.DEPLOYMENT_APP_ID }}
+                  private-key: ${{ secrets.DEPLOYMENT_APP_PRIVATE_KEY }}
+                  owner: ${{ inputs.org_name}}
+                  repositories: ${{ inputs.manifest_repo }}
+
+            - name: Check out manifest repository
+              uses: actions/checkout@v3
+              with:
+                  repository: ${{ inputs.org_name }}/${{ inputs.manifest_repo }}
+                  ref: ${{ inputs.manifest_branch }}
+                  token: ${{ steps.app-token.outputs.token }}
+
+            - name: Update image tag in manifest
+              id: update-manifest
+              run: |
+
+                  # Check if the manifest file exists
+                  if [ -f "${{ inputs.manifest_path }}" ]; then
+                    echo "Updating existing manifest file at ${{ inputs.manifest_path }}"
+                    # Replace image tag in the manifest file
+                    # This assumes the image tag is specified in a standard format like "image: org/repo:tag"
+                    sed -i "s|image:.*|image: ${{ inputs.org_name }}/${{ github.event.repository.name }}:${{ inputs.new_image_tag }}|g" ${{ inputs.manifest_path }}
+                  else
+                    echo "Manifest file not found at ${{ inputs.manifest_path }}"
+                    exit 1
+                  fi
+
+                  # Check if there are changes to commit
+                  if git diff --quiet; then
+                    echo "No changes detected in manifest file"
+                    echo "manifest_updated=false" >> $GITHUB_OUTPUT
+                  else
+                    echo "Changes detected in manifest file"
+                    echo "manifest_updated=true" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Commit and push changes
+              if: steps.update-manifest.outputs.manifest_updated == 'true'
+              run: |
+                  git config user.name "AGIL Ops Hub Deployment"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+                  git commit -m "chore(ci): updated image tag to ${{ inputs.new_image_tag }}" -a
+
+                  git add ${{ inputs.manifest_path }}
+                  git push
+
+                  echo "Successfully updated manifest in ${{ inputs.org_name }}/${{ inputs.manifest_repo }}."
