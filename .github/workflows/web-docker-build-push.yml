@@ -19,9 +19,6 @@ on:
                 description: "Directory containing the Dockerfile"
                 required: true
                 type: string
-        secrets:
-            GITHUB_TOKEN:
-                required: true
         outputs:
             image_tag:
                 description: "The full image tag that was built and pushed"

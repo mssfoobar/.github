@@ -1,0 +1,5 @@
+{
+    "name": "Build & Deploy Module's Service",
+    "description": "The workflow template for building and deploying a module's backend service.",
+    "iconName": "octicon server"
+}

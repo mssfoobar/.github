@@ -1,0 +1,47 @@
+name: Build & Deploy Module Service Image
+
+on:
+    workflow_dispatch:
+    release:
+    push:
+        branches:
+            - develop
+            - release/**
+        paths:
+            - "app/**"
+            - "!.github/workflows/**"
+
+concurrency:
+    # Please replace this with a suitable concurrency group name, e.g. ci-iams-app-${{ github.ref }}
+    group: ci-mod-app-${{ github.ref }}
+    cancel-in-progress: true
+
+defaults:
+    run:
+        shell: bash
+
+jobs:
+    image:
+        name: "Build & Publish Image"
+        uses: mssfoobar/.github/.github/workflows/java-docker-build-push.yml@main
+        with:
+            # please adjust `app_name`, and `build_context` accordingly
+            image_prefix: ghcr.io
+            org_name: ${{ github.repository_owner }}
+            app_name: mod/mod-app
+            build_context: app
+    deploy:
+        needs:
+            - image
+        name: "Update Deployment Manifest"
+        uses: mssfoobar/.github/.github/workflows/update-deployment.yml@main
+        with:
+            # please adjust accordingly (based on which `deployment.yaml`s you are updating)
+            org_name: ${{ github.repository_owner }}
+            manifest_repo: dev-infra
+            manifest_branch: main
+            manifest_path: manifests/mod-app/mod-app-deployment.yml
+            new_image_tag: ${{ needs.image.outputs.image_tag }}
+        secrets:
+            DEPLOYMENT_APP_ID: ${{ vars.DEPLOYMENT_APP_ID }}
+            DEPLOYMENT_APP_PRIVATE_KEY: ${{ secrets.DEPLOYMENT_APP_PRIVATE_KEY }}
