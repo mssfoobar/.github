@@ -61,7 +61,7 @@ jobs:
                     echo "Updating existing manifest file at ${{ inputs.manifest_path }}"
                     # Replace image tag in the manifest file
                     # This assumes the image tag is specified in a standard format like "image: org/repo:tag"
-                    sed -i "s|image:.*|image: ${{ inputs.org_name }}/${{ github.event.repository.name }}:${{ inputs.new_image_tag }}|g" ${{ inputs.manifest_path }}
+                    sed -i "s|image:.*|image: ${{ inputs.new_image_tag }}|g" ${{ inputs.manifest_path }}
                   else
                     echo "Manifest file not found at ${{ inputs.manifest_path }}"
                     exit 1
