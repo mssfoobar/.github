@@ -30,8 +30,7 @@ jobs:
             org_name: ${{ github.repository_owner }}
             app_name: mod/mod-web
             build_context: web
-        secrets:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        secrets: inherit
     deploy:
         needs:
             - image
