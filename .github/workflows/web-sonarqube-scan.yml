@@ -1,0 +1,39 @@
+name:  sonarqube scan for web
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - develop
+
+
+
+permissions:
+  contents: read
+
+jobs:
+
+
+  sonar-scan:
+    name: SonarQube static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+          
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: web
+          args: >
+            -Dsonar.projectKey= ${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.organization="stengg" 
+            -Dsonar.scm.provider=git
+            -Dsonar.sources=.
+            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} 
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }} 
+            -Dsonar.verbose=true
