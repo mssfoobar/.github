@@ -16,9 +16,20 @@ on:
                 required: true
                 type: string
             build_context:
-                description: "Directory containing the Dockerfile"
+                description: "Docker build context"
                 required: true
                 type: string
+            build_file:
+                description: "Dockerfile"
+                required: true
+                type: string
+        secrets:
+            APP_ID:
+                required: true
+                description: "GitHub App ID to download AOH go modules"
+            APP_PRIVATE_KEY:
+                required: true
+                description: "GitHub App Private Key to download AOH go modules"
         outputs:
             image_tag:
                 description: "The full image tag that was built and pushed"
@@ -31,6 +42,14 @@ jobs:
         outputs:
             image_tag: ${{ steps.build_and_upload.outputs.image_tag }}
         steps:
+            - name: "Generate GitHub App Token"
+              uses: actions/create-github-app-token@v1
+              id: app-token
+              with:
+                  app-id: ${{ secrets.APP_ID }}
+                  private-key: ${{ secrets.APP_PRIVATE_KEY }}
+                  owner: ${{ inputs.org_name }}
+
             - name: "☁️ Checkout code"
               uses: actions/checkout@v4
               with:
@@ -47,7 +66,7 @@ jobs:
               id: build_and_upload
               run: |
                   cd ./src
-
+                  
                   if [ "${{ github.event_name }}" == "release" ]; then
                     git_hash=$(git rev-parse --short "$GITHUB_SHA")
                     TAG="${GITHUB_REF##*/}"
@@ -56,14 +75,12 @@ jobs:
                     TAG="${GITHUB_REF##*/}-${git_hash}"
                   fi
 
-                  cd ./${{ inputs.build_context }}
-
                   BASE_IMAGE_TAG="${{ inputs.image_prefix }}/${{ inputs.org_name }}/${{ inputs.app_name }}"
                   IMAGE_TAG="${BASE_IMAGE_TAG}:${TAG}"
                   echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
 
                   export IMAGE_TAG=${IMAGE_TAG}
-                  docker build . --build-arg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} --build-arg REVISION=${TAG} -t ${IMAGE_TAG}
+                  docker build --build-arg GITHUB_USERNAME=x-access-token --build-arg GITHUB_TOKEN=${{ steps.app-token.outputs.token }} --build-arg REVISION=${TAG} -t ${IMAGE_TAG} -f ${{ inputs.build_file }} ${{ inputs.build_context }}
                   docker push ${IMAGE_TAG}
 
                   if [ "${{ github.event_name }}" == "release" ]; then
