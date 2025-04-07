@@ -26,6 +26,8 @@ jobs:
                   SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
               with:
                   projectBaseDir: ${{ inputs.project_base_dir }}
+                  args: >
+                      -Dsonar.projectVersion=${{ github.ref_name }}
 
             - name: "SonarQube Quality Gate check"
               uses: sonarsource/sonarqube-quality-gate-action@master
