@@ -1,0 +1,5 @@
+{
+    "name": "Trigger SonarQube Scan on Web",
+    "description": "The workflow template for triggering a SonarQube scan on a web application.",
+    "iconName": "octicon codescan"
+}
