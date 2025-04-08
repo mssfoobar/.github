@@ -6,19 +6,7 @@ on:
             node-version:
                 required: true
                 type: string
-                description: "GitHub organization name"
-            manifest_repo:
-                required: true
-                type: string
-                description: "Repository containing the deployment manifests"
-        secrets:
-            DEPLOYMENT_APP_ID:
-                required: true
-                description: "GitHub App ID for deployment"
-            DEPLOYMENT_APP_PRIVATE_KEY:
-                required: true
-                description: "GitHub App Private Key for deployment"
-
+                description: "Version of NodeJS to use to build."
 jobs:
     build-and-publish:
         runs-on: ubuntu-latest
