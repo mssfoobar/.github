@@ -44,5 +44,5 @@ jobs:
                   cache: "npm"
                   registry-url: https://npm.pkg.github.com/
             - run: npm ci --ignore-scripts
-            - run: npx cli pack -p ${{ inputs.project-code }} -m ${{ inputs.module-code }} -i ${{ inputs.imports }} -r ${{ github.repositoryUrl }} -k ${{ inputs.keep-dev-deps }}
+            - run: npx cli pack -p ${{ inputs.project-code }} -m ${{ inputs.module-code }} -i ${{ inputs.imports }} -r https://npm.pkg.github.com -k ${{ inputs.keep-dev-deps }}
             - run: npx cli publish -y
