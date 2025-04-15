@@ -3,6 +3,7 @@ name: Build & Deploy Module Web Console Image
 on:
     workflow_dispatch:
     release:
+        types: [published]
     push:
         branches:
             - develop
@@ -22,6 +23,9 @@ defaults:
 
 jobs:
     image:
+        if: >-
+            (github.event_name == 'release' && startsWith(github.event.release.tag_name, '<REPLACE_WITH_COMPONENT_NAME>')) ||
+            (github.event_name != 'release')
         name: "Build & Publish Image"
         uses: mssfoobar/.github/.github/workflows/java-docker-build-push.yml@main
         with:
@@ -32,6 +36,9 @@ jobs:
             build_context: web
         secrets: inherit
     deploy:
+        if: >-
+            (github.event_name == 'release' && startsWith(github.event.release.tag_name, '<REPLACE_WITH_COMPONENT_NAME>')) ||
+            (github.event_name != 'release')
         needs:
             - image
         name: "Update Deployment Manifest"

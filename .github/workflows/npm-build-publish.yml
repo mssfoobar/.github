@@ -1,4 +1,4 @@
-name: Release NPM Packages
+name: Build & Publish Typical NPM Package
 
 on:
     workflow_call:
@@ -6,22 +6,18 @@ on:
             node-version:
                 required: true
                 type: string
-                description: "GitHub organization name"
-            manifest_repo:
+                description: "The version of node to use"
+            working-directory:
                 required: true
+                description: "The working directory containing the npm package to publish"
                 type: string
-                description: "Repository containing the deployment manifests"
-        secrets:
-            DEPLOYMENT_APP_ID:
-                required: true
-                description: "GitHub App ID for deployment"
-            DEPLOYMENT_APP_PRIVATE_KEY:
-                required: true
-                description: "GitHub App Private Key for deployment"
 
 jobs:
     build-and-publish:
         runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
         steps:
             - uses: actions/checkout@v3
             - uses: actions/setup-node@v3
@@ -29,8 +25,9 @@ jobs:
                   node-version: ${{ inputs.node-version }}
                   cache: "npm"
                   registry-url: https://npm.pkg.github.com/
-            - run: npm ci
-            - run: npm run build
-            - run: npx changeset publish
+            - run: |
+                  npm ci
+                  npm run build
+                  npm publish
               env:
                   NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
