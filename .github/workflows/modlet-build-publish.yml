@@ -1,0 +1,49 @@
+name: Build & Publish Modlet NPM Package
+
+on:
+    workflow_call:
+        inputs:
+            node-version:
+                required: true
+                type: string
+                description: "The version of node to use"
+            working-directory:
+                required: true
+                type: string
+                description: "The working directory containing the modlet (web) folder"
+            project-code:
+                required: true
+                type: string
+                description: "Project code for the modlet"
+            module-code:
+                required: true
+                type: string
+                description: "Module code for the modlet"
+            imports:
+                required: true
+                type: string
+                description: "Comma separated list of types to package for the modlet"
+            keep-dev-deps:
+                required: true
+                type: boolean
+                description: "Whether to keep dev dependencies or not"
+
+jobs:
+    build-and-publish:
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: "npm"
+                  registry-url: https://npm.pkg.github.com/
+            - run: |
+                  npm ci
+                  npx cli pack -p ${{ inputs.project-code }} -m ${{ inputs.module-code }} -i ${{ inputs.imports }} -r ${{ github.repositoryUrl }} -k ${{ inputs.keep-dev-deps }}
+                  npx cli publish
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
