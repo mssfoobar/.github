@@ -34,6 +34,8 @@ jobs:
         defaults:
             run:
                 working-directory: ${{ inputs.working-directory }}
+        env:
+            NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
@@ -44,5 +46,3 @@ jobs:
             - run: npm ci --ignore-scripts
             - run: npx cli pack -p ${{ inputs.project-code }} -m ${{ inputs.module-code }} -i ${{ inputs.imports }} -r ${{ github.repositoryUrl }} -k ${{ inputs.keep-dev-deps }}
             - run: npx cli publish -y
-              env:
-                  NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
