@@ -23,6 +23,11 @@ on:
                 required: true
                 type: string
                 description: "Comma separated list of types to package for the modlet"
+            npm-repository:
+                required: false
+                type: string
+                description: "The npm repository to publish to"
+                default: "https://npm.pkg.github.com/"
             keep-dev-deps:
                 required: true
                 type: boolean
@@ -42,7 +47,7 @@ jobs:
               with:
                   node-version: ${{ inputs.node-version }}
                   cache: "npm"
-                  registry-url: https://npm.pkg.github.com/
+                  registry-url: ${{ inputs.npm-repository }}
             - run: npm ci --ignore-scripts
-            - run: npx cli pack -p ${{ inputs.project-code }} -m ${{ inputs.module-code }} -i ${{ inputs.imports }} -r https://npm.pkg.github.com -k ${{ inputs.keep-dev-deps }}
+            - run: npx cli pack -p ${{ inputs.project-code }} -m ${{ inputs.module-code }} -i ${{ inputs.imports }} -r ${{ inputs.npm-repository }} -k ${{ inputs.keep-dev-deps }}
             - run: npx cli publish -y
