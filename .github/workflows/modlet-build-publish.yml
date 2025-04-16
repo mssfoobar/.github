@@ -29,9 +29,10 @@ on:
                 description: "The npm repository to publish to"
                 default: "https://npm.pkg.github.com/"
             keep-dev-deps:
-                required: true
+                required: false
                 type: boolean
                 description: "Whether to keep dev dependencies or not"
+                default: true
 
 jobs:
     build-and-publish:
