@@ -27,6 +27,6 @@ jobs:
                   node-version: ${{ inputs.node-version }}
                   cache: "npm"
                   registry-url: https://npm.pkg.github.com/
-            - run: npm ci --ignore-scripts
+            - run: npm ci --ignore-scripts --cpu=x64 --os=linux
             - run: npm run build
             - run: npm publish

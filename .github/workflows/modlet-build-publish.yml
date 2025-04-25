@@ -49,6 +49,6 @@ jobs:
                   node-version: ${{ inputs.node-version }}
                   cache: "npm"
                   registry-url: ${{ inputs.npm-repository }}
-            - run: npm ci --ignore-scripts
+            - run: npm ci --ignore-scripts --cpu=x64 --os=linux
             - run: npx cli pack -p ${{ inputs.project-code }} -m ${{ inputs.module-code }} -i ${{ inputs.imports }} -r ${{ inputs.npm-repository }} -k ${{ inputs.keep-dev-deps }}
             - run: npx cli publish -y
