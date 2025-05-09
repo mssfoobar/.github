@@ -14,7 +14,7 @@ on:
             manifest_branch:
                 required: true
                 type: string
-                description: "Branch in the manifest repository to update"
+                description: "Branch in the manifest repository to update (target for PR or direct push)"
             manifest_path:
                 required: true
                 type: string
@@ -23,6 +23,11 @@ on:
                 required: true
                 type: string
                 description: "New image tag to be updated in the manifest"
+            team_slug_for_pr:
+                required: false
+                type: string
+                description: "Optional. Team slug (e.g., 'dev-team') to request review from. If provided, a PR is created. Otherwise, changes are pushed directly."
+                default: ""
         secrets:
             DEPLOYMENT_APP_ID:
                 required: true
@@ -42,11 +47,11 @@ jobs:
               with:
                   app-id: ${{ secrets.DEPLOYMENT_APP_ID }}
                   private-key: ${{ secrets.DEPLOYMENT_APP_PRIVATE_KEY }}
-                  owner: ${{ inputs.org_name}}
+                  owner: ${{ inputs.org_name }}
                   repositories: ${{ inputs.manifest_repo }}
 
             - name: Check out manifest repository
-              uses: actions/checkout@v3
+              uses: actions/checkout@v4
               with:
                   repository: ${{ inputs.org_name }}/${{ inputs.manifest_repo }}
                   ref: ${{ inputs.manifest_branch }}
@@ -55,10 +60,10 @@ jobs:
             - name: Update image tag in manifest
               id: update-manifest
               run: |
-
                   # Check if the manifest file exists
                   if [ -f "${{ inputs.manifest_path }}" ]; then
                     echo "Updating existing manifest file at ${{ inputs.manifest_path }}"
+                    
                     # Replace image tag in the manifest file
                     # This assumes the image tag is specified in a standard format like "image: org/repo:tag"
                     sed -i "s|image:.*|image: ${{ inputs.new_image_tag }}|g" ${{ inputs.manifest_path }}
@@ -69,21 +74,80 @@ jobs:
 
                   # Check if there are changes to commit
                   if git diff --quiet; then
-                    echo "No changes detected in manifest file"
+                    echo "No changes detected in manifest file for image tag ${{ inputs.new_image_tag }}"
                     echo "manifest_updated=false" >> $GITHUB_OUTPUT
                   else
-                    echo "Changes detected in manifest file"
+                    echo "Changes detected in manifest file for image tag ${{ inputs.new_image_tag }}"
                     echo "manifest_updated=true" >> $GITHUB_OUTPUT
                   fi
 
-            - name: Commit and push changes
-              if: steps.update-manifest.outputs.manifest_updated == 'true'
+            # --- Conditional Path 1: Create Pull Request ---
+            - name: Create Pull Request with Manifest Changes
+              if: steps.update-manifest.outputs.manifest_updated == 'true' && inputs.team_slug_for_pr != ''
+              env:
+                  GH_TOKEN: ${{ steps.app-token.outputs.token }}
+                  GH_REPO_FULL_NAME: "${{ inputs.org_name }}/${{ inputs.manifest_repo }}"
               run: |
+                  echo "Team slug ('${{ inputs.team_slug_for_pr }}') provided. Creating Pull Request."
                   git config user.name "AGIL Ops Hub Deployment"
                   git config user.email "github-actions[bot]@users.noreply.github.com"
-                  git commit -m "chore(ci): updated image tag to ${{ inputs.new_image_tag }}" -a
 
-                  git add ${{ inputs.manifest_path }}
-                  git push
+                  # Sanitize image tag for branch name
+                  SANITIZED_NEW_IMAGE_TAG=$(echo "${{ inputs.new_image_tag }}" | tr -s ':/' '-' | tr -cd 'a-zA-Z0-9_.-' | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//' | cut -c1-100)
+                  NEW_BRANCH_NAME="ci/update-${SANITIZED_NEW_IMAGE_TAG}-${{ github.run_id }}"
 
-                  echo "Successfully updated manifest in ${{ inputs.org_name }}/${{ inputs.manifest_repo }}."
+                  echo "Creating new branch: $NEW_BRANCH_NAME"
+                  git checkout -b "$NEW_BRANCH_NAME" # Create new branch from inputs.manifest_branch
+
+                  git add "${{ inputs.manifest_path }}"
+                  COMMIT_MESSAGE="chore(ci): Update image to ${{ inputs.new_image_tag }} in ${{ inputs.manifest_path }}"
+                  git commit -m "$COMMIT_MESSAGE"
+
+                  echo "Pushing changes to $NEW_BRANCH_NAME"
+                  git push origin "$NEW_BRANCH_NAME"
+
+                  PR_TITLE="Automated Manifest Update: Set image to ${{ inputs.new_image_tag }} for ${{ inputs.manifest_path }}"
+                  PR_BODY="This pull request was automatically generated by a GitHub Actions workflow.\n\n"
+                  PR_BODY="${PR_BODY}**Action:** Update image tag\n"
+                  PR_BODY="${PR_BODY}**New Image Tag:** \`${{ inputs.new_image_tag }}\`\n"
+                  PR_BODY="${PR_BODY}**Manifest File:** \`${{ inputs.manifest_path }}\`\n\n"
+                  PR_BODY="${PR_BODY}Please review and merge these changes to deploy the updated application.\n\n"
+                  PR_BODY="${PR_BODY}Triggered by workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+                  TEAM_REVIEWER_STRING="${{ inputs.org_name }}/${{ inputs.team_slug_for_pr }}"
+
+                  echo "Creating Pull Request..."
+                  echo "  Repository: $GH_REPO_FULL_NAME"
+                  echo "  Target Branch (base): ${{ inputs.manifest_branch }}"
+                  echo "  Source Branch (head): $NEW_BRANCH_NAME"
+                  echo "  Title: $PR_TITLE"
+                  echo "  Reviewer Team: $TEAM_REVIEWER_STRING"
+
+                  gh pr create \
+                    --repo "$GH_REPO_FULL_NAME" \
+                    --base "${{ inputs.manifest_branch }}" \
+                    --head "$NEW_BRANCH_NAME" \
+                    --title "$PR_TITLE" \
+                    --body "$PR_BODY" \
+                    --reviewer "$TEAM_REVIEWER_STRING"
+
+                  echo "Pull Request created successfully!"
+
+            # --- Conditional Path 2: Commit and Push Directly ---
+            - name: Commit and Push Directly to Branch
+              if: steps.update-manifest.outputs.manifest_updated == 'true' && inputs.team_slug_for_pr == ''
+              run: |
+                  echo "No team slug provided. Committing directly to branch '${{ inputs.manifest_branch }}'."
+                  git config user.name "AGIL Ops Hub Deployment"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+
+                  # Changes were made by 'Update image tag in manifest' step.
+                  # We are already on inputs.manifest_branch (due to the main checkout step).
+                  git add "${{ inputs.manifest_path }}"
+                  COMMIT_MESSAGE="chore(ci): Update image to ${{ inputs.new_image_tag }} in ${{ inputs.manifest_path }}"
+                  git commit -m "$COMMIT_MESSAGE"
+
+                  echo "Pushing changes directly to branch '${{ inputs.manifest_branch }}'."
+                  git push origin "${{ inputs.manifest_branch }}"
+
+                  echo "Successfully updated manifest and pushed directly to ${{ inputs.org_name }}/${{ inputs.manifest_repo }} branch ${{ inputs.manifest_branch }}."
