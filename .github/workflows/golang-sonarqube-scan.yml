@@ -1,0 +1,67 @@
+name: SonarQube Scan
+
+on:
+    workflow_call:
+        inputs:
+            project_base_dir:
+                required: true
+                type: string
+            go_version:
+                required: false
+                type: string
+                default: "1.23.4"
+            go_private:
+                required: false
+                type: string
+                default: github.com/mssfoobar/*
+
+permissions:
+    contents: read
+
+jobs:
+    sonar-scan:
+        name: "SonarQube static Analysis"
+        runs-on: ubuntu-latest
+        env:
+            GOPRIVATE: ${{ inputs.go_private }}
+        steps:
+            - name: "Generate GitHub App Token"
+              uses: actions/create-github-app-token@v1
+              id: app-token
+              with:
+                  app-id: ${{ vars.DEPLOYMENT_APP_ID }}
+                  private-key: ${{ secrets.DEPLOYMENT_APP_PRIVATE_KEY }}
+                  owner: ${{ github.repository_owner }}
+
+            - name: "Checkout code"
+              uses: actions/checkout@v4
+
+            - uses: actions/setup-go@v4
+              with:
+                  go-version: ${{ inputs.go_version }}
+
+            - name: "Generate Code Coverage"
+              working-directory: ${{ inputs.project_base_dir }}
+              run: |
+                  git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"  
+                  go mod download
+                  go test $(go list ./...) -covermode=atomic -coverprofile=coverage.out
+
+            - name: "SonarQube Scan"
+              uses: SonarSource/sonarqube-scan-action@master
+              env:
+                  SONAR_TOKEN: ${{ secrets.SONAR_SECRET }}
+                  SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+              with:
+                  projectBaseDir: ${{ inputs.project_base_dir }}
+                  args: >
+                      -Dsonar.projectVersion=${{ github.ref_name }}
+
+            - name: "SonarQube Quality Gate check"
+              uses: sonarsource/sonarqube-quality-gate-action@master
+              with:
+                  pollingTimeoutSec: 600
+                  scanMetadataReportFile: "./${{ inputs.project_base_dir }}/.scannerwork/report-task.txt"
+              env:
+                  SONAR_TOKEN: ${{ secrets.SONAR_SECRET }}
+                  SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
