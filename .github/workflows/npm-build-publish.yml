@@ -21,12 +21,94 @@ jobs:
         env:
             NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         steps:
-            - uses: actions/checkout@v3
-            - uses: actions/setup-node@v3
+            - name: Checkout code
+              uses: actions/checkout@v3
+
+            - name: Determine paths and lockfile for caching
+              id: paths
+              # This step runs from the repository root to correctly resolve paths
+              working-directory: ${{ github.workspace }}
+              run: |
+                  # Resolve inputs.working-directory to an absolute path
+                  # inputs.working-directory is relative to github.workspace
+                  ABS_INPUT_WORKING_DIR=$(realpath "${{ inputs.working-directory }}")
+                  echo "Input working directory (absolute): $ABS_INPUT_WORKING_DIR"
+
+                  if [ ! -d "$ABS_INPUT_WORKING_DIR" ]; then
+                    echo "::error::Input working directory '${{ inputs.working-directory }}' (resolved to '$ABS_INPUT_WORKING_DIR') does not exist."
+                    exit 1
+                  fi
+
+                  # Determine where 'npm root' points to when run from within the input working directory.
+                  # 'npm root' outputs the path to the node_modules directory.
+                  NPM_ROOT_OUTPUT_FROM_INPUT_WD=$(cd "$ABS_INPUT_WORKING_DIR" && npm root)
+                  echo "npm root output (from input WD): $NPM_ROOT_OUTPUT_FROM_INPUT_WD"
+
+                  # The effective project root is the parent directory of the node_modules location.
+                  EFFECTIVE_PROJECT_ROOT=$(dirname "$NPM_ROOT_OUTPUT_FROM_INPUT_WD")
+                  echo "Effective project root: $EFFECTIVE_PROJECT_ROOT"
+
+                  echo "abs_input_working_dir=${ABS_INPUT_WORKING_DIR}" >> $GITHUB_OUTPUT
+                  echo "effective_project_root=${EFFECTIVE_PROJECT_ROOT}" >> $GITHUB_OUTPUT
+
+                  # Determine the path to the package-lock.json for caching
+                  TARGET_LOCKFILE_PATH=""
+                  if [ "$EFFECTIVE_PROJECT_ROOT" == "$ABS_INPUT_WORKING_DIR" ]; then
+                    # Standalone project or working-directory is the root itself
+                    TARGET_LOCKFILE_PATH="${ABS_INPUT_WORKING_DIR}/package-lock.json"
+                  else
+                    # Part of a workspace, use lockfile from the effective project root
+                    TARGET_LOCKFILE_PATH="${EFFECTIVE_PROJECT_ROOT}/package-lock.json"
+                  fi
+
+                  if [ -f "$TARGET_LOCKFILE_PATH" ]; then
+                    echo "lock_file_for_cache=$TARGET_LOCKFILE_PATH" >> $GITHUB_OUTPUT
+                    echo "Using specific lockfile for cache: $TARGET_LOCKFILE_PATH"
+                  else
+                    # If the specific lockfile isn't found, fall back to setup-node's default glob.
+                    # This allows caching to still attempt to find a lockfile.
+                    echo "lock_file_for_cache=**/package-lock.json" >> $GITHUB_OUTPUT
+                    echo "::warning::Lockfile not found at '$TARGET_LOCKFILE_PATH'. Falling back to setup-node default glob ('**/package-lock.json') for caching."
+                  fi
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v3
               with:
                   node-version: ${{ inputs.node-version }}
                   cache: "npm"
-                  registry-url: https://npm.pkg.github.com/
-            - run: npm ci --ignore-scripts --cpu=x64 --os=linux
-            - run: npm run build
-            - run: npm publish
+                  # Use the determined lock file path for more accurate caching.
+                  # If not found, previous step defaults to a glob.
+                  cache-dependency-path: ${{ steps.paths.outputs.lock_file_for_cache }}
+                  registry-url: https://npm.pkg.github.com/ # For publishing to GitHub Packages Registry
+
+            - name: Install dependencies
+              # This step's working directory doesn't strictly matter as 'cd' uses absolute paths,
+              # but setting to github.workspace for consistency with path determinations.
+              working-directory: ${{ github.workspace }}
+              run: |
+                  echo "Resolved absolute input working directory: ${{ steps.paths.outputs.abs_input_working_dir }}"
+                  echo "Detected effective project root: ${{ steps.paths.outputs.effective_project_root }}"
+
+                  INSTALL_DIR=""
+                  if [ "${{ steps.paths.outputs.effective_project_root }}" == "${{ steps.paths.outputs.abs_input_working_dir }}" ]; then
+                    INSTALL_DIR="${{ steps.paths.outputs.abs_input_working_dir }}"
+                    echo "Running 'npm ci' in the package directory (standalone or root): $INSTALL_DIR"
+                  else
+                    INSTALL_DIR="${{ steps.paths.outputs.effective_project_root }}"
+                    echo "Running 'npm ci' in the workspace root: $INSTALL_DIR"
+                  fi
+
+                  if [ -z "$INSTALL_DIR" ]; then
+                    echo "::error::Could not determine the directory for 'npm ci'."
+                    exit 1
+                  fi
+
+                  cd "$INSTALL_DIR" && npm ci --ignore-scripts --cpu=x64 --os=linux
+
+            - name: Build package
+              # This uses the job's default working-directory: ${{ inputs.working-directory }}
+              run: npm run build
+
+            - name: Publish package
+              # This uses the job's default working-directory: ${{ inputs.working-directory }}
+              run: npm publish
