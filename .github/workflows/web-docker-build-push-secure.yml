@@ -65,7 +65,7 @@ jobs:
                   export IMAGE_TAG=${IMAGE_TAG}
                   export DOCKER_BUILDKIT=1
 
-                  docker build ./${{ inputs.build_context }} --secret id=ACCESS_TOKEN,env=ACCESS_TOKEN --build-arg PUBLIC_STATIC_BUILD_VERSION=${TAG} --build-arg REVISION=${TAG} -t ${IMAGE_TAG}
+                  docker build . -f ./${{ inputs.build_context }} --secret id=ACCESS_TOKEN,env=ACCESS_TOKEN --build-arg PUBLIC_STATIC_BUILD_VERSION=${TAG} --build-arg REVISION=${TAG} -t ${IMAGE_TAG}
                   docker push ${IMAGE_TAG}
 
                   if [ "${{ github.event_name }}" == "release" ]; then
