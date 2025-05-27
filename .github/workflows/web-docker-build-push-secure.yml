@@ -58,8 +58,6 @@ jobs:
                     TAG="${GITHUB_REF##*/}-${git_hash}"
                   fi
 
-                  cd ./${{ inputs.build_context }}
-
                   BASE_IMAGE_TAG="${{ inputs.image_prefix }}/${{ inputs.org_name }}/${{ inputs.app_name }}"
                   IMAGE_TAG="${BASE_IMAGE_TAG}:${TAG}"
                   echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
@@ -67,7 +65,7 @@ jobs:
                   export IMAGE_TAG=${IMAGE_TAG}
                   export DOCKER_BUILDKIT=1
 
-                  docker build . --secret id=ACCESS_TOKEN,env=ACCESS_TOKEN --build-arg PUBLIC_STATIC_BUILD_VERSION=${TAG} --build-arg REVISION=${TAG} -t ${IMAGE_TAG}
+                  docker build ./${{ inputs.build_context }} --secret id=ACCESS_TOKEN,env=ACCESS_TOKEN --build-arg PUBLIC_STATIC_BUILD_VERSION=${TAG} --build-arg REVISION=${TAG} -t ${IMAGE_TAG}
                   docker push ${IMAGE_TAG}
 
                   if [ "${{ github.event_name }}" == "release" ]; then
