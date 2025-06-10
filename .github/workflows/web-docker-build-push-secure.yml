@@ -50,7 +50,7 @@ jobs:
               run: |
                   cd ./src
 
-                  if [ "${{ github.event_name }}" == "release" ]; then
+                  if [[ "${{ github.ref }}" == "refs/tags/"* || "${{ github.event_name }}" == "release" ]]; then
                     git_hash=$(git rev-parse --short "$GITHUB_SHA")
                     TAG="${GITHUB_REF##*/}"
                   else
@@ -68,7 +68,7 @@ jobs:
                   docker build . -f ./${{ inputs.build_context }} --secret id=access_token,env=ACCESS_TOKEN --build-arg PUBLIC_STATIC_BUILD_VERSION=${TAG} --build-arg REVISION=${TAG} -t ${IMAGE_TAG}
                   docker push ${IMAGE_TAG}
 
-                  if [ "${{ github.event_name }}" == "release" ]; then
+                  if [[ "${{ github.ref }}" == "refs/tags/"* || "${{ github.event_name }}" == "release" ]]; then
                     ## Extra "latest" Tag
                     docker tag ${IMAGE_TAG} ${BASE_IMAGE_TAG}:latest
                     docker push ${BASE_IMAGE_TAG}:latest
