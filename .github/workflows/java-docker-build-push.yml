@@ -54,7 +54,7 @@ jobs:
               run: |
                   cd ./src
 
-                  if [ "${{ github.ref }}" == "refs/tags/"* || "${{ github.event_name }}" == "release" ]; then
+                  if [[ "${{ github.ref }}" == "refs/tags/"* || "${{ github.event_name }}" == "release" ]]; then
                     git_hash=$(git rev-parse --short "$GITHUB_SHA")
                     TAG="${GITHUB_REF##*/}"
                   else
