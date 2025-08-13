@@ -27,9 +27,10 @@ jobs:
             (github.event_name == 'release' && startsWith(github.event.release.tag_name, '<REPLACE_WITH_COMPONENT_NAME>')) ||
             (github.event_name != 'release')
         name: "Build & Publish Image"
-        uses: mssfoobar/.github/.github/workflows/java-docker-build-push.yml@main
+        uses: mssfoobar/.github/.github/workflows/docker-build-push.yml@main
         with:
             # please adjust `app_name`, and `build_context` accordingly
+            build_type: java
             image_prefix: ghcr.io
             org_name: ${{ github.repository_owner }}
             app_name: mod/mod-app
