@@ -12,9 +12,10 @@ on:
                 type: string
                 description: "Repository containing the deployment manifests"
             manifest_branch:
-                required: true
+                required: false
                 type: string
-                description: "Branch in the manifest repository to update (target for PR or direct push)"
+                description: "Branch in the manifest repository to update (target for PR or direct push). Defaults to 'main' if not specified."
+                default: "main"
             manifest_path:
                 required: true
                 type: string
@@ -23,6 +24,16 @@ on:
                 required: true
                 type: string
                 description: "New image tag to be updated in the manifest"
+            helm_service_name:
+                required: false
+                type: string
+                description: "Optional. Service name in helm values (e.g., 'web', 'kafkaConnect'). If provided, updates helm values format. Otherwise, uses traditional K8s manifest format."
+                default: ""
+            image_repository:
+                required: false
+                type: string
+                description: "Optional. Full image repository path (e.g., 'ghcr.io/org/repo'). Required when updating helm values format."
+                default: ""
             team_slug_for_pr:
                 required: false
                 type: string
@@ -57,19 +68,70 @@ jobs:
                   ref: ${{ inputs.manifest_branch }}
                   token: ${{ steps.app-token.outputs.token }}
 
+            - name: Install yq for YAML processing
+              run: |
+                  sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+                  sudo chmod +x /usr/bin/yq
+
             - name: Update image tag in manifest
               id: update-manifest
               run: |
                   # Check if the manifest file exists
-                  if [ -f "${{ inputs.manifest_path }}" ]; then
-                    echo "Updating existing manifest file at ${{ inputs.manifest_path }}"
-                    
-                    # Replace image tag in the manifest file
-                    # This assumes the image tag is specified in a standard format like "image: org/repo:tag"
-                    sed -i "s|image:.*|image: ${{ inputs.new_image_tag }}|g" ${{ inputs.manifest_path }}
-                  else
+                  if [ ! -f "${{ inputs.manifest_path }}" ]; then
                     echo "Manifest file not found at ${{ inputs.manifest_path }}"
                     exit 1
+                  fi
+
+                  echo "Updating manifest file at ${{ inputs.manifest_path }}"
+
+                  # Determine update strategy based on inputs
+                  if [ -n "${{ inputs.helm_service_name }}" ]; then
+                    # Helm values format update
+                    echo "Detected helm values update for service: ${{ inputs.helm_service_name }}"
+                    
+                    if [ -z "${{ inputs.image_repository }}" ]; then
+                      echo "Error: image_repository is required when updating helm values format"
+                      exit 1
+                    fi
+
+                    # Extract tag from new_image_tag (remove repository part if present)
+                    TAG_ONLY="${{ inputs.new_image_tag }}"
+                    if [[ "$TAG_ONLY" == *":"* ]]; then
+                      TAG_ONLY="${TAG_ONLY##*:}"
+                    fi
+                    
+                    SERVICE_NAME="${{ inputs.helm_service_name }}"
+                    REPO_PATH="${{ inputs.image_repository }}"
+                    
+                    echo "Updating helm values:"
+                    echo "  Service: $SERVICE_NAME"
+                    echo "  Repository: $REPO_PATH" 
+                    echo "  Tag: $TAG_ONLY"
+                    
+                    # Update repository if it doesn't match
+                    CURRENT_REPO=$(yq eval ".$SERVICE_NAME.image.repository" "${{ inputs.manifest_path }}")
+                    if [ "$CURRENT_REPO" != "$REPO_PATH" ]; then
+                      echo "Updating repository from $CURRENT_REPO to $REPO_PATH"
+                      yq eval ".$SERVICE_NAME.image.repository = \"$REPO_PATH\"" -i "${{ inputs.manifest_path }}"
+                    fi
+                    
+                    # Update tag
+                    yq eval ".$SERVICE_NAME.image.tag = \"$TAG_ONLY\"" -i "${{ inputs.manifest_path }}"
+                    
+                  else
+                    # Traditional Kubernetes manifest format update
+                    echo "Detected traditional K8s manifest update"
+                    echo "Updating image to: ${{ inputs.new_image_tag }}"
+                    
+                    # Check if file contains image: lines (K8s manifest)
+                    if grep -q "image:" "${{ inputs.manifest_path }}"; then
+                      # Use sed for backward compatibility with existing K8s manifests
+                      sed -i "s|image:.*|image: ${{ inputs.new_image_tag }}|g" "${{ inputs.manifest_path }}"
+                    else
+                      echo "No 'image:' lines found in manifest file. This might not be a standard K8s manifest."
+                      echo "Consider using helm_service_name parameter for helm values files."
+                      exit 1
+                    fi
                   fi
 
                   # Check if there are changes to commit
@@ -79,6 +141,10 @@ jobs:
                   else
                     echo "Changes detected in manifest file for image tag ${{ inputs.new_image_tag }}"
                     echo "manifest_updated=true" >> $GITHUB_OUTPUT
+                    
+                    # Show the changes for debugging
+                    echo "Git diff of changes:"
+                    git diff "${{ inputs.manifest_path }}"
                   fi
 
             # --- Conditional Path 1: Create Pull Request ---
