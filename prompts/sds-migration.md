@@ -1,4 +1,4 @@
-# Web-base to SDS (Session Data Store) Migration Prompt
+# Web-base to SDS (Session Data Store) Migration
 
 ## Context
 
@@ -930,15 +930,3 @@ log.error("error message", { err });
 -   [ ] Security headers set
 -   [ ] Logger call signatures correct (object before message)
 -   [ ] Cookie sizes reduced (session ID only)
-
-## Summary
-
-This migration transforms the authentication system from client-side cookie storage to server-side session management using SDS. The key benefits are:
-
-1. **Enhanced Security**: Tokens stored server-side, not in cookies
-2. **Reduced Network Overhead**: Only session ID transmitted with requests
-3. **No Cookie Size Limits**: Eliminates HTTP 431 errors
-4. **Backward Compatible**: Dual flow supports both SDS and legacy modes
-5. **Better Session Control**: Centralized management and monitoring
-
-The migration involves updating ~10 files, adding 3 new endpoints, and configuring environment variables. The implementation maintains full backward compatibility through a dual authentication flow pattern.
