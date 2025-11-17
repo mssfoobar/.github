@@ -85,9 +85,9 @@ jobs:
                     TAG="${GITHUB_REF##*/}-${git_hash}"
                   fi
 
-                  # Add image suffix if provided
-                  if [[ -n "${{ inputs.image_suffix }}" ]]; then
-                    TAG="${TAG}-${{ inputs.image_suffix }}"
+                  # Add tag suffix if provided
+                  if [[ -n "${{ inputs.tag_suffix }}" ]]; then
+                    TAG="${TAG}-${{ inputs.tag_suffix }}"
                   fi
 
                   BASE_IMAGE_TAG="${{ inputs.image_prefix }}/${{ inputs.org_name }}/${{ inputs.app_name }}"
