@@ -91,11 +91,13 @@ import (
     "your-module-name/docs"
 
     "github.com/go-chi/chi/v5"
+    "github.com/go-chi/chi/v5/middleware"
     httpSwagger "github.com/swaggo/http-swagger/v2"
 )
 
 func NewRouter(db db.DbInterface, config *config.Config) http.Handler {
     r := chi.NewRouter()
+    r.Use(middleware.Recoverer)
 
     // Configure Swagger metadata at runtime
     docs.SwaggerInfo.Title = "[Your Service Name] API"
@@ -105,10 +107,19 @@ func NewRouter(db db.DbInterface, config *config.Config) http.Handler {
     docs.SwaggerInfo.BasePath = "/"
     docs.SwaggerInfo.Schemes = []string{"http", "https"}
 
-    // Mount Swagger UI - IMPORTANT: Use wildcard route with Handler()
+    // Mount Swagger UI without logging middleware to avoid excessive logs
     r.Get("/swagger-ui/*", httpSwagger.Handler())
 
-    // ... rest of your routes
+    // Apply logging middleware only to API routes
+    r.Group(func(r chi.Router) {
+        r.Use(yourLoggingMiddleware())
+
+        // ... your API routes here
+        r.Route("/", func(r chi.Router) {
+            r.Mount("/", registerHealth())
+            r.Mount("/resources", registerResourceHandlers(db))
+        })
+    })
 
     return r
 }
@@ -118,6 +129,7 @@ func NewRouter(db db.DbInterface, config *config.Config) http.Handler {
 - Use `r.Get("/swagger-ui/*", httpSwagger.Handler())` - NOT `r.Mount()`
 - Set `docs.SwaggerInfo.Host = ""` for automatic host/port detection
 - Configure metadata at runtime to override annotations
+- **Mount Swagger UI BEFORE or OUTSIDE logging middleware** to avoid logging all static assets (HTML, CSS, JS files) and cluttering logs. Use route groups to apply logging middleware only to API endpoints.
 
 ### 5. Handler Annotations
 
