@@ -23,6 +23,16 @@ on:
                 description: "Dockerfile"
                 required: true
                 type: string
+            build_args:
+                description: "Additional docker build arguments (e.g., '--build-arg KEY1=VALUE1 --build-arg KEY2=VALUE2')"
+                required: false
+                type: string
+                default: ""
+            tag_suffix:
+              description: "Additional image tag suffix for specific target build naming (e.g., 'linux-amd64')"
+              required: false
+              type: string
+              default: ""
         secrets:
             APP_ID:
                 required: true
@@ -75,12 +85,17 @@ jobs:
                     TAG="${GITHUB_REF##*/}-${git_hash}"
                   fi
 
+                  # Add image suffix if provided
+                  if [[ -n "${{ inputs.image_suffix }}" ]]; then
+                    TAG="${TAG}-${{ inputs.image_suffix }}"
+                  fi
+
                   BASE_IMAGE_TAG="${{ inputs.image_prefix }}/${{ inputs.org_name }}/${{ inputs.app_name }}"
                   IMAGE_TAG="${BASE_IMAGE_TAG}:${TAG}"
                   echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
 
                   export IMAGE_TAG=${IMAGE_TAG}
-                  docker build --build-arg GITHUB_USERNAME=x-access-token --build-arg GITHUB_TOKEN=${{ steps.app-token.outputs.token }} --build-arg REVISION=${TAG} -t ${IMAGE_TAG} -f ${{ inputs.build_file }} ${{ inputs.build_context }}
+                  docker build --build-arg GITHUB_USERNAME=x-access-token --build-arg GITHUB_TOKEN=${{ steps.app-token.outputs.token }} --build-arg REVISION=${TAG} ${{ inputs.build_args }} -t ${IMAGE_TAG} -f ${{ inputs.build_file }} ${{ inputs.build_context }}
                   docker push ${IMAGE_TAG}
 
                   if [[ "${{ github.ref }}" == "refs/tags/"* || "${{ github.event_name }}" == "release" ]]; then
