@@ -19,6 +19,10 @@ on:
                 description: "Directory containing the Dockerfile"
                 required: true
                 type: string
+            ecr_repository_name:
+                description: "ECR repository name. If provided, image will be pushed to both GHCR and ECR (requires AWS_ROLE_ARN, AWS_REGION, AWS_ACCOUNT_ID org vars)"
+                required: false
+                type: string
         outputs:
             image_tag:
                 description: "The full image tag that was built and pushed"
@@ -28,6 +32,10 @@ jobs:
     build-and-push:
         name: "Build & Publish Image"
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: write
+            id-token: write  # Required for AWS OIDC authentication
         outputs:
             image_tag: ${{ steps.build_and_upload.outputs.image_tag }}
         steps:
@@ -61,6 +69,7 @@ jobs:
                   BASE_IMAGE_TAG="${{ inputs.image_prefix }}/${{ inputs.org_name }}/${{ inputs.app_name }}"
                   IMAGE_TAG="${BASE_IMAGE_TAG}:${TAG}"
                   echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+                  echo "tag=${TAG}" >> $GITHUB_OUTPUT
 
                   export IMAGE_TAG=${IMAGE_TAG}
                   export DOCKER_BUILDKIT=1
@@ -77,3 +86,45 @@ jobs:
                     docker tag ${IMAGE_TAG} ${BASE_IMAGE_TAG}:latest-dev
                     docker push ${BASE_IMAGE_TAG}:latest-dev
                   fi
+
+            - name: "🔐 Configure AWS credentials"
+              if: inputs.ecr_repository_name != ''
+              uses: aws-actions/configure-aws-credentials@v5
+              with:
+                  role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+                  aws-region: ${{ vars.AWS_REGION }}
+
+            - name: "🔑 Log in to Amazon ECR"
+              if: inputs.ecr_repository_name != ''
+              id: login-ecr
+              uses: aws-actions/amazon-ecr-login@v2
+
+            - name: "📦 Push to Amazon ECR"
+              if: inputs.ecr_repository_name != ''
+              run: |
+                  TAG="${{ steps.build_and_upload.outputs.tag }}"
+
+                  # GHCR image that was already built
+                  GHCR_IMAGE="${{ inputs.image_prefix }}/${{ inputs.org_name }}/${{ inputs.app_name }}:${TAG}"
+
+                  # ECR image paths
+                  ECR_REGISTRY="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com"
+                  ECR_BASE_IMAGE="${ECR_REGISTRY}/${{ inputs.ecr_repository_name }}"
+                  ECR_IMAGE="${ECR_BASE_IMAGE}:${TAG}"
+
+                  # Tag the GHCR image for ECR
+                  docker tag ${GHCR_IMAGE} ${ECR_IMAGE}
+                  docker push ${ECR_IMAGE}
+
+                  # Push additional tags
+                  if [[ "${{ github.ref }}" == "refs/tags/"* || "${{ github.event_name }}" == "release" ]]; then
+                    ## Extra "latest" Tag
+                    docker tag ${ECR_IMAGE} ${ECR_BASE_IMAGE}:latest
+                    docker push ${ECR_BASE_IMAGE}:latest
+                  else
+                    ## Extra "latest-dev" Tag
+                    docker tag ${ECR_IMAGE} ${ECR_BASE_IMAGE}:latest-dev
+                    docker push ${ECR_BASE_IMAGE}:latest-dev
+                  fi
+
+                  echo "✅ Successfully pushed to ECR: ${ECR_IMAGE}"
