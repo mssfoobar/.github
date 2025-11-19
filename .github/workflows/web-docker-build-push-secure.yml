@@ -112,6 +112,9 @@ jobs:
                   ECR_BASE_IMAGE="${ECR_REGISTRY}/${{ inputs.ecr_repository_name }}"
                   ECR_IMAGE="${ECR_BASE_IMAGE}:${TAG}"
 
+                  # Pull the GHCR image to ensure it's available locally
+                  docker pull ${GHCR_IMAGE}
+
                   # Tag the GHCR image for ECR
                   docker tag ${GHCR_IMAGE} ${ECR_IMAGE}
                   docker push ${ECR_IMAGE}
