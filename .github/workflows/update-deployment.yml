@@ -160,8 +160,9 @@ jobs:
 
                   # Sanitize image tag for branch name
                   SANITIZED_NEW_IMAGE_TAG=$(echo "${{ inputs.new_image_tag }}" | tr -s ':/' '-' | tr -cd 'a-zA-Z0-9_.-' | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//' | cut -c1-100)
-                  TIMESTAMP=$(date +%s%N)
-                  NEW_BRANCH_NAME="ci/update-${SANITIZED_NEW_IMAGE_TAG}-${{ github.run_id }}-${TIMESTAMP}"
+                  # Use a random suffix to ensure uniqueness even if run multiple times in parallel or on systems where date %N is not supported
+                  RANDOM_SUFFIX=$(python3 -c "import uuid; print(uuid.uuid4().hex[:8])")
+                  NEW_BRANCH_NAME="ci/update-${SANITIZED_NEW_IMAGE_TAG}-${{ github.run_id }}-${RANDOM_SUFFIX}"
 
                   echo "Creating new branch: $NEW_BRANCH_NAME"
                   git checkout -b "$NEW_BRANCH_NAME" # Create new branch from inputs.manifest_branch
