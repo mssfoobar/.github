@@ -82,7 +82,7 @@ jobs:
                   git config user.email "github-actions[bot]@users.noreply.github.com"
                   git add -A
                   git commit -m "chore(release): v${RELEASE_VERSION}"
-                  git tag "v${RELEASE_VERSION}"
+                  git tag -a "v${RELEASE_VERSION}" -m "v${RELEASE_VERSION}"
                   git push origin "$BRANCH" --follow-tags
 
             - name: Build
@@ -114,6 +114,7 @@ jobs:
                   RELEASE_VERSION: ${{ steps.version.outputs.version }}
               run: |
                   gh release create "v${RELEASE_VERSION}" \
+                    --target "$GITHUB_SHA" \
                     --title "v${RELEASE_VERSION}" \
                     --notes-file /tmp/release-notes.md
 
