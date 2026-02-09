@@ -1,0 +1,133 @@
+name: NPM Changeset Release
+
+on:
+    workflow_call:
+        inputs:
+            node-version:
+                required: true
+                type: string
+                description: "The version of Node.js to use"
+            scope:
+                required: true
+                type: string
+                description: "npm scope for GitHub Packages (e.g. @mssfoobar)"
+            sync-branch:
+                required: false
+                type: string
+                default: develop
+                description: "Branch to sync version bump back to via PR"
+            legacy-peer-deps:
+                required: false
+                type: boolean
+                default: false
+                description: "Pass --legacy-peer-deps to npm ci"
+
+jobs:
+    release:
+        name: Version, Publish & Release
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: write
+            pull-requests: write
+            packages: write
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+                  registry-url: https://npm.pkg.github.com
+                  scope: ${{ inputs.scope }}
+
+            - name: Install dependencies
+              run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+
+            - name: Check for pending changesets
+              id: check_changesets
+              run: |
+                  CHANGESET_FILES=$(find .changeset -name '*.md' ! -name 'README.md' | head -1)
+                  if [ -z "$CHANGESET_FILES" ]; then
+                    echo "has_changesets=false" >> "$GITHUB_OUTPUT"
+                    echo "No pending changesets found — skipping release."
+                  else
+                    echo "has_changesets=true" >> "$GITHUB_OUTPUT"
+                    echo "Pending changesets found — proceeding with release."
+                  fi
+
+            - name: Version packages
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              run: npx changeset version
+
+            - name: Extract version
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              id: version
+              run: |
+                  VERSION=$(node -p "require('./package.json').version")
+                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+            - name: Commit version bump
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              env:
+                  RELEASE_VERSION: ${{ steps.version.outputs.version }}
+                  BRANCH: ${{ github.ref_name }}
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+                  git add -A
+                  git commit -m "chore(release): v${RELEASE_VERSION}"
+                  git tag "v${RELEASE_VERSION}"
+                  git push origin "$BRANCH" --follow-tags
+
+            - name: Build
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              run: npm run build
+
+            - name: Publish to GitHub Packages
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              run: npm publish
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Extract changelog entry
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              id: changelog
+              env:
+                  RELEASE_VERSION: ${{ steps.version.outputs.version }}
+              run: |
+                  CHANGELOG=$(awk "/^## ${RELEASE_VERSION//./\\.}$/,/^## /" CHANGELOG.md | head -n -1)
+                  if [ -z "$CHANGELOG" ]; then
+                    CHANGELOG="Release v${RELEASE_VERSION}"
+                  fi
+                  echo "$CHANGELOG" > /tmp/release-notes.md
+
+            - name: Create GitHub Release
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_VERSION: ${{ steps.version.outputs.version }}
+              run: |
+                  gh release create "v${RELEASE_VERSION}" \
+                    --title "v${RELEASE_VERSION}" \
+                    --notes-file /tmp/release-notes.md
+
+            - name: Create PR to sync back
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_VERSION: ${{ steps.version.outputs.version }}
+                  SYNC_BRANCH: ${{ inputs.sync-branch }}
+                  BRANCH: ${{ github.ref_name }}
+              run: |
+                  gh pr create \
+                    --base "$SYNC_BRANCH" \
+                    --head "$BRANCH" \
+                    --title "chore: sync release v${RELEASE_VERSION} back to ${SYNC_BRANCH}" \
+                    --body "Automated PR to sync version bump and changelog back to ${SYNC_BRANCH}." \
+                    || echo "PR already exists or cannot be created — skipping."

@@ -1,0 +1,47 @@
+name: NPM CI
+
+on:
+    workflow_call:
+        inputs:
+            node-version:
+                required: true
+                type: string
+                description: "The version of Node.js to use"
+            legacy-peer-deps:
+                required: false
+                type: boolean
+                default: false
+                description: "Pass --legacy-peer-deps to npm ci"
+            run-typecheck:
+                required: false
+                type: boolean
+                default: true
+                description: "Run npm run typecheck step"
+
+jobs:
+    ci:
+        name: Build & Test
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+
+            - name: Typecheck
+              if: inputs.run-typecheck
+              run: npm run typecheck
+
+            - name: Test
+              run: npm test
+
+            - name: Build
+              run: npm run build
