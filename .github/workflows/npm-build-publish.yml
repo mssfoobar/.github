@@ -27,6 +27,7 @@ jobs:
                 working-directory: ${{ inputs.working-directory }}
         permissions:
             contents: read
+            packages: write
 
         steps:
             - name: Checkout code
