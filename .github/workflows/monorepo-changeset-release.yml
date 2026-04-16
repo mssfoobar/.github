@@ -7,6 +7,11 @@ on:
                 required: true
                 type: string
                 description: "The version of Node.js to use"
+            scope:
+                required: false
+                type: string
+                default: ""
+                description: "npm scope for GitHub Packages auth (e.g. @mssfoobar). Leave empty if no private packages."
             sync-branch:
                 required: false
                 type: string
@@ -33,9 +38,13 @@ jobs:
               with:
                   node-version: ${{ inputs.node-version }}
                   cache: npm
+                  registry-url: ${{ inputs.scope && 'https://npm.pkg.github.com' || '' }}
+                  scope: ${{ inputs.scope }}
 
             - name: Install dependencies
               run: npm ci --ignore-scripts
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
             - name: Check for pending changesets
               id: check_changesets
