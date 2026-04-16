@@ -1,0 +1,217 @@
+name: Monorepo Changeset Release
+
+on:
+    workflow_call:
+        inputs:
+            node-version:
+                required: true
+                type: string
+                description: "The version of Node.js to use"
+            sync-branch:
+                required: false
+                type: string
+                default: develop
+                description: "Branch to sync version bump back to via PR"
+
+jobs:
+    release:
+        name: Version & Release
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: write
+            pull-requests: write
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci --ignore-scripts
+
+            - name: Check for pending changesets
+              id: check_changesets
+              run: |
+                  CHANGESET_FILES=$(find .changeset -name '*.md' ! -name 'README.md' | head -1)
+                  if [ -z "$CHANGESET_FILES" ]; then
+                    echo "has_changesets=false" >> "$GITHUB_OUTPUT"
+                    echo "No pending changesets found — skipping release."
+                  else
+                    echo "has_changesets=true" >> "$GITHUB_OUTPUT"
+                    echo "Pending changesets found — proceeding with release."
+                  fi
+
+            - name: Snapshot versions before bump
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              id: pre_versions
+              run: |
+                  # Record current versions of all workspace packages
+                  node -e "
+                    const fs = require('fs');
+                    const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+                    const workspaces = root.workspaces || [];
+                    const versions = {};
+                    for (const ws of workspaces) {
+                      const pkg = JSON.parse(fs.readFileSync(ws + '/package.json', 'utf8'));
+                      versions[pkg.name] = { version: pkg.version, path: ws };
+                    }
+                    fs.writeFileSync('/tmp/pre-versions.json', JSON.stringify(versions));
+                    console.log('Pre-bump versions:', JSON.stringify(versions, null, 2));
+                  "
+
+            - name: Version packages
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              run: npx changeset version
+
+            - name: Detect changed packages
+              if: steps.check_changesets.outputs.has_changesets == 'true'
+              id: changes
+              run: |
+                  node -e "
+                    const fs = require('fs');
+                    const pre = JSON.parse(fs.readFileSync('/tmp/pre-versions.json', 'utf8'));
+                    const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+                    const workspaces = root.workspaces || [];
+
+                    const changed = [];
+                    let releaseVersion = null;
+
+                    for (const ws of workspaces) {
+                      const pkg = JSON.parse(fs.readFileSync(ws + '/package.json', 'utf8'));
+                      const oldVersion = pre[pkg.name]?.version;
+                      if (oldVersion && oldVersion !== pkg.version) {
+                        // Derive tag prefix: @mssfoobar/msr-app → msr-app
+                        const tagPrefix = pkg.name.replace(/^@[^/]+\//, '');
+                        changed.push({
+                          name: pkg.name,
+                          path: ws,
+                          oldVersion: oldVersion,
+                          newVersion: pkg.version,
+                          tagPrefix: tagPrefix,
+                          tag: tagPrefix + '/v' + pkg.version
+                        });
+                        if (!releaseVersion) releaseVersion = pkg.version;
+                      }
+                    }
+
+                    if (changed.length === 0) {
+                      console.log('No version changes detected.');
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, 'has_changes=false\n');
+                    } else {
+                      console.log('Changed packages:', JSON.stringify(changed, null, 2));
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, 'has_changes=true\n');
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, 'release_version=' + releaseVersion + '\n');
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed_json=' + JSON.stringify(changed) + '\n');
+
+                      // Build summary for release notes
+                      const summary = changed.map(c => '- **' + c.name + '**: ' + c.oldVersion + ' → ' + c.newVersion).join('\n');
+                      fs.writeFileSync('/tmp/changed-summary.txt', summary);
+                    }
+                  "
+
+            - name: Collect release notes
+              if: steps.changes.outputs.has_changes == 'true'
+              run: |
+                  CHANGED='${{ steps.changes.outputs.changed_json }}'
+
+                  echo "## Packages" > /tmp/release-notes.md
+                  echo "" >> /tmp/release-notes.md
+                  cat /tmp/changed-summary.txt >> /tmp/release-notes.md
+                  echo "" >> /tmp/release-notes.md
+
+                  # Collect changelog entries from each changed package
+                  echo "$CHANGED" | node -e "
+                    const fs = require('fs');
+                    const changed = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
+                    let notes = '';
+                    for (const pkg of changed) {
+                      const clPath = pkg.path + '/CHANGELOG.md';
+                      if (fs.existsSync(clPath)) {
+                        const cl = fs.readFileSync(clPath, 'utf8');
+                        // Extract the latest version section
+                        const versionEscaped = pkg.newVersion.replace(/\./g, '\\\\.');
+                        const re = new RegExp('^## ' + versionEscaped + '.*$', 'm');
+                        const match = cl.match(re);
+                        if (match) {
+                          const start = cl.indexOf(match[0]);
+                          const nextSection = cl.indexOf('\n## ', start + 1);
+                          const entry = nextSection > 0
+                            ? cl.slice(start, nextSection).trim()
+                            : cl.slice(start).trim();
+                          notes += '\n---\n\n' + entry + '\n';
+                        }
+                      }
+                    }
+                    fs.appendFileSync('/tmp/release-notes.md', notes);
+                  "
+
+                  echo "" >> /tmp/release-notes.md
+                  cat /tmp/release-notes.md
+
+            - name: Commit version bump
+              if: steps.changes.outputs.has_changes == 'true'
+              env:
+                  RELEASE_VERSION: ${{ steps.changes.outputs.release_version }}
+                  BRANCH: ${{ github.ref_name }}
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+                  git add -A
+                  git commit -m "chore(release): v${RELEASE_VERSION}"
+
+            - name: Create per-package tags
+              if: steps.changes.outputs.has_changes == 'true'
+              env:
+                  RELEASE_VERSION: ${{ steps.changes.outputs.release_version }}
+              run: |
+                  # Create a release tag
+                  git tag -a "v${RELEASE_VERSION}" -m "v${RELEASE_VERSION}"
+
+                  # Create per-package tags for reference
+                  echo '${{ steps.changes.outputs.changed_json }}' | node -e "
+                    const { execSync } = require('child_process');
+                    const changed = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8'));
+                    for (const pkg of changed) {
+                      console.log('Creating tag: ' + pkg.tag);
+                      execSync('git tag -a \"' + pkg.tag + '\" -m \"' + pkg.tag + '\"');
+                    }
+                  "
+
+            - name: Push commit and tags
+              if: steps.changes.outputs.has_changes == 'true'
+              env:
+                  BRANCH: ${{ github.ref_name }}
+              run: git push origin "$BRANCH" --follow-tags
+
+            - name: Create GitHub Release
+              if: steps.changes.outputs.has_changes == 'true'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_VERSION: ${{ steps.changes.outputs.release_version }}
+              run: |
+                  gh release create "v${RELEASE_VERSION}" \
+                    --title "v${RELEASE_VERSION}" \
+                    --notes-file /tmp/release-notes.md
+
+            - name: Create PR to sync back
+              if: steps.changes.outputs.has_changes == 'true'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_VERSION: ${{ steps.changes.outputs.release_version }}
+                  SYNC_BRANCH: ${{ inputs.sync-branch }}
+                  BRANCH: ${{ github.ref_name }}
+              run: |
+                  gh pr create \
+                    --base "$SYNC_BRANCH" \
+                    --head "$BRANCH" \
+                    --title "chore: sync release v${RELEASE_VERSION} back to ${SYNC_BRANCH}" \
+                    --body "Automated PR to sync version bump and changelog back to ${SYNC_BRANCH}." \
+                    || echo "PR already exists or cannot be created — skipping."
