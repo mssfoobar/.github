@@ -131,8 +131,11 @@ jobs:
             }
             const workspaces = root.workspaces || [];
             for (const p of workspaces) {
+              if (typeof p !== 'string') {
+                throw new Error('Unsupported entry in package.json#workspaces (' + JSON.stringify(p) + '). Only string paths are supported. Migrate to pnpm (package-manager: pnpm) for richer workspace config.');
+              }
               if (p.includes('*')) {
-                throw new Error('Glob patterns in package.json#workspaces (\\'' + p + '\\') are not supported. Expand to literal paths or migrate to pnpm (package-manager: pnpm), which resolves workspaces via pnpm-workspace.yaml.');
+                throw new Error('Glob patterns in package.json#workspaces (\\'' + p + '\\') are not supported. Expand to literal paths, or migrate to pnpm (package-manager: pnpm) and declare globs in pnpm-workspace.yaml.');
               }
             }
             const targets = workspaces.length ? workspaces : ['.'];
