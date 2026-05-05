@@ -42,7 +42,7 @@ on:
         required: false
         type: string
         default: 'npm'
-        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup, reads workspace packages via `pnpm list -r --depth=-1 --json`, and publishes via `pnpm --filter <name> publish --no-git-checks`. Consumers using `pnpm` MUST either declare `packageManager` in root `package.json` or pass `pnpm-version` below.'
+        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup, reads workspace packages via `pnpm list -r --depth=-1 --json`, and publishes via `pnpm --filter "./<path>" publish --no-git-checks` (path-based filter, mirroring the npm path''s `--workspace <path>`). Consumers using `pnpm` MUST either declare `packageManager` in root `package.json` or pass `pnpm-version` below.'
       pnpm-version:
         required: false
         type: string
@@ -82,6 +82,7 @@ jobs:
           fetch-depth: 0
 
       - name: Validate inputs
+        working-directory: '.'
         env:
           PM: ${{ inputs.package-manager }}
         run: |
@@ -151,7 +152,17 @@ jobs:
             const path = require('path');
             const { execSync } = require('child_process');
             const out = execSync('pnpm list -r --depth=-1 --json', { encoding: 'utf8' });
-            const list = JSON.parse(out);
+            let list;
+            try {
+              list = JSON.parse(out);
+            } catch (e) {
+              console.error('Failed to parse pnpm list output. First 500 chars:');
+              console.error(out.slice(0, 500));
+              throw e;
+            }
+            if (!Array.isArray(list)) {
+              throw new Error('pnpm list -r --json did not return an array; got: ' + typeof list);
+            }
             const versions = {};
             for (const pkg of list) {
               if (pkg.private) continue;
@@ -208,7 +219,11 @@ jobs:
             for (const pkg of changed) {
               let cmd;
               if (pm === 'pnpm') {
-                cmd = 'pnpm --filter ' + pkg.name + ' publish --tag ' + npmTag + ' --no-git-checks';
+                // Path-based filter (mirrors npm's --workspace <path>):
+                // unambiguous, immune to scoped-name parsing quirks, no
+                // collision risk if two workspaces ever share a name.
+                const filter = pkg.path === '.' ? '.' : './' + pkg.path;
+                cmd = 'pnpm --filter \"' + filter + '\" publish --tag ' + npmTag + ' --no-git-checks';
               } else {
                 cmd = pkg.path === '.'
                   ? 'npm publish --tag ' + npmTag

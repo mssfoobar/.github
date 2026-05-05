@@ -20,8 +20,10 @@ name: NPM Stable Publish
 # publish`. Running `npm publish --workspaces` or `pnpm publish -r`
 # directly publishes successfully but the action can't extract
 # package@version pairs, so `createGithubReleases` silently no-ops.
-# Recommended `release:stable` for both managers: `changeset publish`
-# (or `pnpm exec changeset publish`).
+# Recommended `release:stable` for both managers: `changeset publish`.
+# Both npm-run and pnpm-run inject `./node_modules/.bin` into PATH, so
+# the bare `changeset` resolves correctly under either manager — no
+# `pnpm exec` or `npx` prefix needed.
 
 on:
   workflow_call:
@@ -79,6 +81,7 @@ jobs:
           fetch-depth: 0
 
       - name: Validate inputs
+        working-directory: '.'
         env:
           PM: ${{ inputs.package-manager }}
         run: |

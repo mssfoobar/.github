@@ -237,7 +237,8 @@ via `pnpm/action-setup`, uses `pnpm install --frozen-lockfile`, caches
 `pnpm-lock.yaml`, and invokes scripts via `pnpm <script>`. The snapshot
 publish reusable additionally swaps its per-package detection from reading
 `package.json#workspaces` to `pnpm list -r --depth=-1 --json`, and publishes
-via `pnpm --filter <name> publish --no-git-checks`.
+via `pnpm --filter "./<path>" publish --no-git-checks` (path-based filter,
+mirroring the npm path's `--workspace <path>`).
 
 **Prerequisite for `pnpm`:** consumers must either declare `packageManager`
 in their root `package.json` (preferred — locks the same version locally
@@ -358,8 +359,11 @@ silently produce no Releases.
 }
 ```
 
-`changeset publish` works for both npm and pnpm consumers — it shells
-out to the underlying registry CLI per workspace.
+`changeset publish` works for both npm and pnpm consumers — it calls
+`npm publish` per workspace internally. Crucially, `changeset version`
+(run on the rc branch before opening the rc → main PR) normalises any
+`workspace:*` / `workspace:^` dep ranges to concrete versions, so
+`changeset publish` doesn't need pnpm's runtime rewriting.
 
 ### Required `.changeset/config.json` block
 
