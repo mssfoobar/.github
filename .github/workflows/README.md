@@ -317,13 +317,25 @@ jobs:
       scope: '@mssfoobar'
 ```
 
+For a pnpm consumer, add `package-manager: pnpm` to each job's `with:`
+block:
+
+```yaml
+  publish-alpha:
+    if: github.ref == 'refs/heads/develop'
+    uses: mssfoobar/.github/.github/workflows/npm-snapshot-publish.yml@main
+    with:
+      tag: alpha
+      scope: '@mssfoobar'
+      package-manager: pnpm
+```
+
+(Pin the pnpm version via `package.json#packageManager` in the consumer
+— see [Package manager](#package-manager) above.)
+
 The consuming repo doesn't need to define a `release:<tag>` script — this
 workflow runs `changeset version --snapshot=<tag>.<run_number>` itself,
 detects which packages got bumped, and publishes them directly.
-
-For a `pnpm` consumer, set `package-manager: pnpm` on each job. Pin the
-pnpm version via `package.json#packageManager` in the consumer (see
-[Package manager](#package-manager) above).
 
 #### `npm-stable-publish.yml`
 
