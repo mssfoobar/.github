@@ -15,7 +15,12 @@ on:
         required: false
         type: string
         default: 'npm'
-        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup (resolving the version from package.json#packageManager) and uses `pnpm install --frozen-lockfile` + `pnpm <script>` throughout.'
+        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup, uses `pnpm install --frozen-lockfile`, and invokes scripts as `pnpm <script>`. Consumers using `pnpm` MUST either declare `packageManager` in their root `package.json` (e.g. `"packageManager": "pnpm@10.16.1"`) or pass `pnpm-version` below — without one, pnpm/action-setup errors.'
+      pnpm-version:
+        required: false
+        type: string
+        default: ''
+        description: '(pnpm only) Explicit pnpm version, e.g. `10.16.1`. If empty, pnpm/action-setup resolves the version from `package.json#packageManager`. Ignored for npm.'
       node-version:
         required: false
         type: string
@@ -76,9 +81,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate inputs
+        working-directory: '.'
+        env:
+          PM: ${{ inputs.package-manager }}
+        run: |
+          case "$PM" in
+            npm|pnpm) ;;
+            *) echo "::error::package-manager must be 'npm' or 'pnpm', got '$PM'"; exit 1 ;;
+          esac
+
       - name: Set up pnpm
         if: inputs.package-manager == 'pnpm'
         uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -94,6 +111,7 @@ jobs:
 
       - name: Install (pnpm)
         if: inputs.package-manager == 'pnpm'
+        working-directory: '.'
         run: pnpm install --frozen-lockfile
 
       - name: Lint

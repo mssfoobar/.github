@@ -233,12 +233,22 @@ Canonical implementation: see [mssfoobar/aa-cli](https://github.com/mssfoobar/aa
 All three workflows that install dependencies (`npm-pr-validation`,
 `npm-snapshot-publish`, `npm-stable-publish`) accept a `package-manager`
 input — `npm` (default) or `pnpm`. With `pnpm`, the workflow installs pnpm
-via `pnpm/action-setup` (resolving the version from
-`package.json#packageManager`), uses `pnpm install --frozen-lockfile`,
-caches `pnpm-lock.yaml`, and invokes scripts via `pnpm <script>`. The
-snapshot publish reusable additionally swaps its per-package detection from
-reading `package.json#workspaces` to `pnpm list -r --depth=-1 --json`, and
-publishes via `pnpm --filter <name> publish --no-git-checks`.
+via `pnpm/action-setup`, uses `pnpm install --frozen-lockfile`, caches
+`pnpm-lock.yaml`, and invokes scripts via `pnpm <script>`. The snapshot
+publish reusable additionally swaps its per-package detection from reading
+`package.json#workspaces` to `pnpm list -r --depth=-1 --json`, and publishes
+via `pnpm --filter <name> publish --no-git-checks`.
+
+**Prerequisite for `pnpm`:** consumers must either declare `packageManager`
+in their root `package.json` (preferred — locks the same version locally
+and in CI) **or** pass `pnpm-version` to the reusable. Without one of
+these, `pnpm/action-setup` errors. Example:
+
+```json
+{
+  "packageManager": "pnpm@10.16.1"
+}
+```
 
 `changeset-check.yml` doesn't install anything, so it has no
 `package-manager` input.
@@ -306,19 +316,13 @@ jobs:
       scope: '@mssfoobar'
 ```
 
-The consuming repo must define `release:alpha` and `release:rc` npm scripts
-in its root `package.json`. Example:
+The consuming repo doesn't need to define a `release:<tag>` script — this
+workflow runs `changeset version --snapshot=<tag>.<run_number>` itself,
+detects which packages got bumped, and publishes them directly.
 
-```json
-{
-  "scripts": {
-    "release:alpha": "npm publish --workspaces --tag alpha",
-    "release:rc":    "npm publish --workspaces --tag next"
-  }
-}
-```
-
-(Single-package repos drop `--workspaces`.)
+For a `pnpm` consumer, set `package-manager: pnpm` on each job. Pin the
+pnpm version via `package.json#packageManager` in the consumer (see
+[Package manager](#package-manager) above).
 
 #### `npm-stable-publish.yml`
 
@@ -339,15 +343,23 @@ jobs:
       scope: '@mssfoobar'
 ```
 
-The consuming repo must define `release:stable`:
+The consuming repo must define `release:stable`. Use `changeset publish`
+— **not** `npm publish --workspaces` or `pnpm publish -r`. `changesets/
+action@v1` parses the publish command's stdout to detect what got
+published and create matching GitHub Releases; only `changeset publish`'s
+output format is recognised. The other commands publish successfully but
+silently produce no Releases.
 
 ```json
 {
   "scripts": {
-    "release:stable": "npm publish --workspaces"
+    "release:stable": "changeset publish"
   }
 }
 ```
+
+`changeset publish` works for both npm and pnpm consumers — it shells
+out to the underlying registry CLI per workspace.
 
 ### Required `.changeset/config.json` block
 

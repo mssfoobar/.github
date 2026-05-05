@@ -13,6 +13,15 @@ name: NPM Stable Publish
 # `createGithubReleases: true` produces a GitHub Release for each newly
 # published package. Pre-release versions are auto-marked as
 # "Pre-release" in GitHub's UI.
+#
+# release-script note: changesets/action@v1 parses the publish command's
+# stdout to detect what got published and create matching GitHub
+# Releases. The parser expects the format produced by `changeset
+# publish`. Running `npm publish --workspaces` or `pnpm publish -r`
+# directly publishes successfully but the action can't extract
+# package@version pairs, so `createGithubReleases` silently no-ops.
+# Recommended `release:stable` for both managers: `changeset publish`
+# (or `pnpm exec changeset publish`).
 
 on:
   workflow_call:
@@ -26,7 +35,12 @@ on:
         required: false
         type: string
         default: 'npm'
-        description: 'Package manager — `npm` or `pnpm`. Affects install + how the release script is invoked.'
+        description: 'Package manager — `npm` or `pnpm`. Affects install + how the release script is invoked. Consumers using `pnpm` MUST either declare `packageManager` in root `package.json` or pass `pnpm-version` below.'
+      pnpm-version:
+        required: false
+        type: string
+        default: ''
+        description: '(pnpm only) Explicit pnpm version, e.g. `10.16.1`. If empty, pnpm/action-setup resolves the version from `package.json#packageManager`. Ignored for npm.'
       node-version:
         required: false
         type: string
@@ -35,6 +49,11 @@ on:
         required: true
         type: string
         description: 'npm scope for GitHub Packages auth (e.g. "@mssfoobar")'
+      cache-dependency-path:
+        required: false
+        type: string
+        default: ''
+        description: 'Path to lockfile for setup-node cache key. Defaults to `package-lock.json` for npm and `pnpm-lock.yaml` for pnpm.'
       create-github-releases:
         required: false
         type: boolean
@@ -59,16 +78,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate inputs
+        env:
+          PM: ${{ inputs.package-manager }}
+        run: |
+          case "$PM" in
+            npm|pnpm) ;;
+            *) echo "::error::package-manager must be 'npm' or 'pnpm', got '$PM'"; exit 1 ;;
+          esac
+
       - name: Set up pnpm
         if: inputs.package-manager == 'pnpm'
         uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
 
       - name: Set up Node + GitHub Packages registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ inputs.package-manager }}
-          cache-dependency-path: ${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path != '' && inputs.cache-dependency-path || (inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json') }}
           registry-url: 'https://npm.pkg.github.com'
           scope: ${{ inputs.scope }}
 

@@ -10,6 +10,18 @@ name: NPM Snapshot Publish
 # are published. Packages whose version didn't move are skipped — their
 # existing registry version remains current.
 #
+# Manager-specific notes:
+#   * npm path enumerates `package.json#workspaces`. The repo root is
+#     never included unless `workspaces` is empty (single-package mode).
+#   * pnpm path enumerates `pnpm list -r --depth=-1 --json`, which DOES
+#     include the workspace root. We rely on the root being `private:
+#     true` (the standard convention for a monorepo root) to filter it
+#     out. A non-private root would publish — keep your root private.
+#   * pnpm publish rewrites `workspace:*` / `workspace:^` deps to
+#     concrete versions on the fly; npm publish does not. The publish
+#     paths are split partly because of this — don't try to unify them
+#     without re-validating against an aoh-web-lib-style workspace.
+#
 # The snapshot id is `<tag>.<github.run_number>`, producing clean
 # sequential versions like `0.1.0-alpha.123` (paired with a changesets
 # config that has `prereleaseTemplate: "{tag}"` and
@@ -30,7 +42,12 @@ on:
         required: false
         type: string
         default: 'npm'
-        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup, reads workspace packages via `pnpm list -r --depth=-1 --json`, and publishes via `pnpm publish` from each workspace dir.'
+        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup, reads workspace packages via `pnpm list -r --depth=-1 --json`, and publishes via `pnpm --filter <name> publish --no-git-checks`. Consumers using `pnpm` MUST either declare `packageManager` in root `package.json` or pass `pnpm-version` below.'
+      pnpm-version:
+        required: false
+        type: string
+        default: ''
+        description: '(pnpm only) Explicit pnpm version, e.g. `10.16.1`. If empty, pnpm/action-setup resolves the version from `package.json#packageManager`. Ignored for npm.'
       node-version:
         required: false
         type: string
@@ -39,6 +56,11 @@ on:
         required: true
         type: string
         description: 'npm scope for GitHub Packages auth (e.g. "@mssfoobar")'
+      cache-dependency-path:
+        required: false
+        type: string
+        default: ''
+        description: 'Path to lockfile for setup-node cache key. Defaults to `package-lock.json` for npm and `pnpm-lock.yaml` for pnpm.'
       legacy-peer-deps:
         required: false
         type: boolean
@@ -59,16 +81,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate inputs
+        env:
+          PM: ${{ inputs.package-manager }}
+        run: |
+          case "$PM" in
+            npm|pnpm) ;;
+            *) echo "::error::package-manager must be 'npm' or 'pnpm', got '$PM'"; exit 1 ;;
+          esac
+
       - name: Set up pnpm
         if: inputs.package-manager == 'pnpm'
         uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
 
       - name: Set up Node + GitHub Packages registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ inputs.package-manager }}
-          cache-dependency-path: ${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path != '' && inputs.cache-dependency-path || (inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json') }}
           registry-url: 'https://npm.pkg.github.com'
           scope: ${{ inputs.scope }}
 
