@@ -1,0 +1,144 @@
+name: NPM Snapshot Publish
+
+# Reusable snapshot publish for the lazy + snapshot release pattern.
+# develop → publishes with --tag alpha; */rc → publishes with --tag next.
+# cli/package.json (or each workspace's package.json) is mutated
+# transiently by `changeset version --snapshot=<id>` and never committed.
+#
+# Per-package detection: in workspace projects, only packages whose
+# version actually changed (because a pending changeset affected them)
+# are published. Packages whose version didn't move are skipped — their
+# existing registry version remains current.
+#
+# The snapshot id is `<tag>.<github.run_number>`, producing clean
+# sequential versions like `0.1.0-alpha.123` (paired with a changesets
+# config that has `prereleaseTemplate: "{tag}"` and
+# `useCalculatedVersion: true`).
+#
+# Auth: plain GITHUB_TOKEN. No PAT or App-token needed because nothing
+# pushes back to a protected branch — `cli/package.json`'s git state is
+# untouched after the workflow exits.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+        description: 'Snapshot id prefix and release-script suffix. Use "alpha" for develop pushes, "rc" for */rc pushes. The workflow runs `npm run release:<tag>`.'
+      node-version:
+        required: false
+        type: string
+        default: '20'
+      scope:
+        required: true
+        type: string
+        description: 'npm scope for GitHub Packages auth (e.g. "@mssfoobar")'
+      legacy-peer-deps:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    name: Publish snapshot (${{ inputs.tag }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node + GitHub Packages registry
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          registry-url: 'https://npm.pkg.github.com'
+          scope: ${{ inputs.scope }}
+
+      - name: Install
+        run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Snapshot pre-bump versions
+        run: |
+          node -e "
+            const fs = require('fs');
+            const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const workspaces = root.workspaces || [];
+            const targets = workspaces.length ? workspaces : ['.'];
+            const versions = {};
+            for (const ws of targets) {
+              const path = ws === '.' ? 'package.json' : ws + '/package.json';
+              try {
+                const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+                if (pkg.private) continue;
+                versions[pkg.name] = { version: pkg.version, path: ws };
+              } catch (e) {
+                // Workspace entry without a package.json — skip silently.
+              }
+            }
+            fs.writeFileSync('/tmp/pre-versions.json', JSON.stringify(versions));
+            console.log('Pre-bump versions:');
+            for (const [name, info] of Object.entries(versions)) {
+              console.log('  ' + name + ' @ ' + info.version + ' (' + info.path + ')');
+            }
+          "
+
+      - name: Compute snapshot version
+        run: npx changeset version --snapshot=${{ inputs.tag }}.${{ github.run_number }}
+
+      - name: Detect changed packages and publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          # rc → npm dist-tag "next"; everything else uses tag verbatim
+          NPM_TAG=$([ "$TAG" = "rc" ] && echo "next" || echo "$TAG")
+          export NPM_TAG
+
+          node -e "
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            const pre = JSON.parse(fs.readFileSync('/tmp/pre-versions.json', 'utf8'));
+            const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const workspaces = root.workspaces || [];
+            const targets = workspaces.length ? workspaces : ['.'];
+            const npmTag = process.env.NPM_TAG;
+
+            const changed = [];
+            for (const ws of targets) {
+              const path = ws === '.' ? 'package.json' : ws + '/package.json';
+              try {
+                const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+                if (pkg.private) continue;
+                const oldVersion = pre[pkg.name]?.version;
+                if (oldVersion && oldVersion !== pkg.version) {
+                  changed.push({ name: pkg.name, path: ws, oldVersion, newVersion: pkg.version });
+                }
+              } catch {}
+            }
+
+            if (changed.length === 0) {
+              console.log('No packages changed — nothing to publish.');
+              return;
+            }
+
+            console.log('Publishing ' + changed.length + ' package(s) with --tag ' + npmTag + ':');
+            for (const pkg of changed) {
+              console.log('  ' + pkg.name + ': ' + pkg.oldVersion + ' → ' + pkg.newVersion);
+            }
+            for (const pkg of changed) {
+              const cmd = pkg.path === '.'
+                ? 'npm publish --tag ' + npmTag
+                : 'npm publish --workspace ' + pkg.path + ' --tag ' + npmTag;
+              console.log('\\n\$ ' + cmd);
+              execSync(cmd, { stdio: 'inherit' });
+            }
+          "

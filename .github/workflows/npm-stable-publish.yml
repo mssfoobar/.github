@@ -1,0 +1,76 @@
+name: NPM Stable Publish
+
+# Reusable stable publish for the lazy + snapshot release pattern.
+# Runs on push to the stable branch (typically `main`) AFTER the
+# rc → main PR has merged. The version commit (cli/package.json bump
+# + CHANGELOG) was already produced manually on the rc branch via
+# `npx changeset version` before that PR opened.
+#
+# Uses changesets/action@v1 in publish mode — it reads each workspace
+# package's version, compares to the registry, and publishes only
+# those that aren't already there. Idempotent: re-runs are safe.
+#
+# `createGithubReleases: true` produces a GitHub Release for each newly
+# published package. Pre-release versions are auto-marked as
+# "Pre-release" in GitHub's UI.
+
+on:
+  workflow_call:
+    inputs:
+      release-script:
+        required: false
+        type: string
+        default: 'release:stable'
+        description: 'npm script the action runs to actually publish (e.g. "release:stable", "release"). Should publish all workspace packages with the default `latest` dist-tag.'
+      node-version:
+        required: false
+        type: string
+        default: '20'
+      scope:
+        required: true
+        type: string
+        description: 'npm scope for GitHub Packages auth (e.g. "@mssfoobar")'
+      create-github-releases:
+        required: false
+        type: boolean
+        default: true
+      legacy-peer-deps:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    name: Publish stable
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node + GitHub Packages registry
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          registry-url: 'https://npm.pkg.github.com'
+          scope: ${{ inputs.scope }}
+
+      - name: Install
+        run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish via changesets/action
+        uses: changesets/action@v1
+        with:
+          publish: npm run ${{ inputs.release-script }}
+          createGithubReleases: ${{ inputs.create-github-releases }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

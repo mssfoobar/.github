@@ -1,0 +1,102 @@
+name: NPM PR Validation
+
+# Reusable PR-validation gate for npm projects following the lazy +
+# snapshot release pattern. Runs lint, format-check, typecheck, build,
+# test as a server-side mirror of the local pre-commit gate. Each step
+# can be opted in/out via inputs.
+#
+# Companion workflows: changeset-check, npm-snapshot-publish,
+# npm-stable-publish.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        required: false
+        type: string
+        default: '20'
+        description: 'Node.js version'
+      working-directory:
+        required: false
+        type: string
+        default: '.'
+        description: 'Working directory for npm scripts (use the package directory in single-package repos that keep their package.json outside the root; defaults to repo root for workspaces)'
+      cache-dependency-path:
+        required: false
+        type: string
+        default: 'package-lock.json'
+        description: 'Path to lockfile for setup-node cache key'
+      install-from-root:
+        required: false
+        type: boolean
+        default: true
+        description: 'Run `npm ci` from the repo root (true for workspaces; set false for single-package repos that vendor their lockfile in a subdirectory)'
+      legacy-peer-deps:
+        required: false
+        type: boolean
+        default: false
+      run-lint:
+        required: false
+        type: boolean
+        default: false
+        description: 'Run `npm run lint` — opt in only if the project defines this script'
+      run-format-check:
+        required: false
+        type: boolean
+        default: false
+        description: 'Run `npm run format:check` — opt in only if the project defines this script'
+      run-typecheck:
+        required: false
+        type: boolean
+        default: true
+      run-build:
+        required: false
+        type: boolean
+        default: true
+      run-test:
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: Install
+        working-directory: ${{ inputs.install-from-root && '.' || inputs.working-directory }}
+        run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+
+      - name: Lint
+        if: inputs.run-lint
+        run: npm run lint
+
+      - name: Format check
+        if: inputs.run-format-check
+        run: npm run format:check
+
+      - name: Type check
+        if: inputs.run-typecheck
+        run: npm run typecheck
+
+      - name: Build
+        if: inputs.run-build
+        run: npm run build
+
+      - name: Test
+        if: inputs.run-test
+        run: npm test
