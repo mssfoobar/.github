@@ -17,25 +17,50 @@ jobs:
     #   github.event.pull_request.user.login == 'external-contributor' ||
     #   github.event.pull_request.user.login == 'new-developer' ||
     #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-    
+
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
       issues: read
       id-token: write
-    
+
     steps:
+      # Auth note: Anthropic blocks Claude subscription-based access
+      # (the OAuth token path) for this repo specifically — every PR
+      # fails with "Your organization has disabled Claude subscription
+      # access for Claude Code · Use an Anthropic API key instead, or
+      # ask your admin to enable access". OAuth still works in
+      # consumer repos (aa-cli, aoh-web-lib).
+      #
+      # Workaround: use ANTHROPIC_API_KEY when present, otherwise skip
+      # the action cleanly so PRs aren't littered with red checks.
+      # Admin TODO: provision ANTHROPIC_API_KEY at the org secret level
+      # to re-enable reviews here.
+      - name: Check Claude auth availability
+        id: auth
+        env:
+          API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$API_KEY" ]; then
+            echo "method=api_key" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Claude Code Review skipped: ANTHROPIC_API_KEY org secret is not configured. Anthropic blocks the OAuth-token path for this repo; provisioning the API key at the org level re-enables reviews here."
+            echo "method=skip" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
+        if: steps.auth.outputs.method != 'skip'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Run Claude Code Review
+        if: steps.auth.outputs.method != 'skip'
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             Please review this pull request and provide feedback on:
             - Code quality and best practices
