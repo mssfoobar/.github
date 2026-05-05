@@ -21,7 +21,12 @@ on:
         required: false
         type: string
         default: 'release:stable'
-        description: 'npm script the action runs to actually publish (e.g. "release:stable", "release"). Should publish all workspace packages with the default `latest` dist-tag.'
+        description: 'Script the action runs to actually publish (e.g. "release:stable", "release"). Should publish all workspace packages with the default `latest` dist-tag.'
+      package-manager:
+        required: false
+        type: string
+        default: 'npm'
+        description: 'Package manager — `npm` or `pnpm`. Affects install + how the release script is invoked.'
       node-version:
         required: false
         type: string
@@ -38,6 +43,7 @@ on:
         required: false
         type: boolean
         default: false
+        description: '(npm only) Pass `--legacy-peer-deps` to `npm ci`. Ignored for pnpm.'
 
 jobs:
   publish:
@@ -53,23 +59,35 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+
       - name: Set up Node + GitHub Packages registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
           registry-url: 'https://npm.pkg.github.com'
           scope: ${{ inputs.scope }}
 
-      - name: Install
+      - name: Install (npm)
+        if: inputs.package-manager == 'npm'
         run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm install --frozen-lockfile
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish via changesets/action
         uses: changesets/action@v1
         with:
-          publish: npm run ${{ inputs.release-script }}
+          publish: ${{ inputs.package-manager }} run ${{ inputs.release-script }}
           createGithubReleases: ${{ inputs.create-github-releases }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

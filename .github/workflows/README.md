@@ -228,6 +228,21 @@ are published; unchanged packages are skipped.
 
 Canonical implementation: see [mssfoobar/aa-cli](https://github.com/mssfoobar/aa-cli).
 
+### Package manager
+
+All three workflows that install dependencies (`npm-pr-validation`,
+`npm-snapshot-publish`, `npm-stable-publish`) accept a `package-manager`
+input — `npm` (default) or `pnpm`. With `pnpm`, the workflow installs pnpm
+via `pnpm/action-setup` (resolving the version from
+`package.json#packageManager`), uses `pnpm install --frozen-lockfile`,
+caches `pnpm-lock.yaml`, and invokes scripts via `pnpm <script>`. The
+snapshot publish reusable additionally swaps its per-package detection from
+reading `package.json#workspaces` to `pnpm list -r --depth=-1 --json`, and
+publishes via `pnpm --filter <name> publish --no-git-checks`.
+
+`changeset-check.yml` doesn't install anything, so it has no
+`package-manager` input.
+
 ### Workflows
 
 #### `npm-pr-validation.yml`

@@ -25,7 +25,12 @@ on:
       tag:
         required: true
         type: string
-        description: 'Snapshot id prefix and release-script suffix. Use "alpha" for develop pushes, "rc" for */rc pushes. The workflow runs `npm run release:<tag>`.'
+        description: 'Snapshot id prefix and release-script suffix. Use "alpha" for develop pushes, "rc" for */rc pushes.'
+      package-manager:
+        required: false
+        type: string
+        default: 'npm'
+        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup, reads workspace packages via `pnpm list -r --depth=-1 --json`, and publishes via `pnpm publish` from each workspace dir.'
       node-version:
         required: false
         type: string
@@ -38,6 +43,7 @@ on:
         required: false
         type: boolean
         default: false
+        description: '(npm only) Pass `--legacy-peer-deps` to `npm ci`. Ignored for pnpm.'
 
 jobs:
   publish:
@@ -53,20 +59,33 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+
       - name: Set up Node + GitHub Packages registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
           registry-url: 'https://npm.pkg.github.com'
           scope: ${{ inputs.scope }}
 
-      - name: Install
+      - name: Install (npm)
+        if: inputs.package-manager == 'npm'
         run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Snapshot pre-bump versions
+      - name: Install (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Snapshot pre-bump versions (npm)
+        if: inputs.package-manager == 'npm'
         run: |
           node -e "
             const fs = require('fs');
@@ -91,6 +110,28 @@ jobs:
             }
           "
 
+      - name: Snapshot pre-bump versions (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
+            const out = execSync('pnpm list -r --depth=-1 --json', { encoding: 'utf8' });
+            const list = JSON.parse(out);
+            const versions = {};
+            for (const pkg of list) {
+              if (pkg.private) continue;
+              const rel = path.relative(process.cwd(), pkg.path) || '.';
+              versions[pkg.name] = { version: pkg.version, path: rel };
+            }
+            fs.writeFileSync('/tmp/pre-versions.json', JSON.stringify(versions));
+            console.log('Pre-bump versions:');
+            for (const [name, info] of Object.entries(versions)) {
+              console.log('  ' + name + ' @ ' + info.version + ' (' + info.path + ')');
+            }
+          "
+
       - name: Compute snapshot version
         run: npx changeset version --snapshot=${{ inputs.tag }}.${{ github.run_number }}
 
@@ -98,6 +139,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
+          PM: ${{ inputs.package-manager }}
         run: |
           # rc → npm dist-tag "next"; everything else uses tag verbatim
           NPM_TAG=$([ "$TAG" = "rc" ] && echo "next" || echo "$TAG")
@@ -107,20 +149,16 @@ jobs:
             const fs = require('fs');
             const { execSync } = require('child_process');
             const pre = JSON.parse(fs.readFileSync('/tmp/pre-versions.json', 'utf8'));
-            const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            const workspaces = root.workspaces || [];
-            const targets = workspaces.length ? workspaces : ['.'];
             const npmTag = process.env.NPM_TAG;
+            const pm = process.env.PM;
 
             const changed = [];
-            for (const ws of targets) {
-              const path = ws === '.' ? 'package.json' : ws + '/package.json';
+            for (const [name, info] of Object.entries(pre)) {
+              const pkgPath = info.path === '.' ? 'package.json' : info.path + '/package.json';
               try {
-                const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
-                if (pkg.private) continue;
-                const oldVersion = pre[pkg.name]?.version;
-                if (oldVersion && oldVersion !== pkg.version) {
-                  changed.push({ name: pkg.name, path: ws, oldVersion, newVersion: pkg.version });
+                const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                if (info.version !== pkg.version) {
+                  changed.push({ name, path: info.path, oldVersion: info.version, newVersion: pkg.version });
                 }
               } catch {}
             }
@@ -135,9 +173,14 @@ jobs:
               console.log('  ' + pkg.name + ': ' + pkg.oldVersion + ' → ' + pkg.newVersion);
             }
             for (const pkg of changed) {
-              const cmd = pkg.path === '.'
-                ? 'npm publish --tag ' + npmTag
-                : 'npm publish --workspace ' + pkg.path + ' --tag ' + npmTag;
+              let cmd;
+              if (pm === 'pnpm') {
+                cmd = 'pnpm --filter ' + pkg.name + ' publish --tag ' + npmTag + ' --no-git-checks';
+              } else {
+                cmd = pkg.path === '.'
+                  ? 'npm publish --tag ' + npmTag
+                  : 'npm publish --workspace ' + pkg.path + ' --tag ' + npmTag;
+              }
               console.log('\\n\$ ' + cmd);
               execSync(cmd, { stdio: 'inherit' });
             }

@@ -11,6 +11,11 @@ name: NPM PR Validation
 on:
   workflow_call:
     inputs:
+      package-manager:
+        required: false
+        type: string
+        default: 'npm'
+        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup (resolving the version from package.json#packageManager) and uses `pnpm install --frozen-lockfile` + `pnpm <script>` throughout.'
       node-version:
         required: false
         type: string
@@ -20,21 +25,22 @@ on:
         required: false
         type: string
         default: '.'
-        description: 'Working directory for npm scripts (use the package directory in single-package repos that keep their package.json outside the root; defaults to repo root for workspaces)'
+        description: 'Working directory for scripts (use the package directory in single-package repos that keep their package.json outside the root; defaults to repo root for workspaces)'
       cache-dependency-path:
         required: false
         type: string
-        default: 'package-lock.json'
-        description: 'Path to lockfile for setup-node cache key'
+        default: ''
+        description: 'Path to lockfile for setup-node cache key. Defaults to `package-lock.json` for npm and `pnpm-lock.yaml` for pnpm.'
       install-from-root:
         required: false
         type: boolean
         default: true
-        description: 'Run `npm ci` from the repo root (true for workspaces; set false for single-package repos that vendor their lockfile in a subdirectory)'
+        description: '(npm only) Run `npm ci` from the repo root (true for workspaces; set false for single-package repos that vendor their lockfile in a subdirectory). Ignored for pnpm — pnpm always installs from root.'
       legacy-peer-deps:
         required: false
         type: boolean
         default: false
+        description: '(npm only) Pass `--legacy-peer-deps` to `npm ci`. Ignored for pnpm.'
       run-lint:
         required: false
         type: boolean
@@ -70,33 +76,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
-          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path != '' && inputs.cache-dependency-path || (inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json') }}
 
-      - name: Install
+      - name: Install (npm)
+        if: inputs.package-manager == 'npm'
         working-directory: ${{ inputs.install-from-root && '.' || inputs.working-directory }}
         run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
 
+      - name: Install (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm install --frozen-lockfile
+
       - name: Lint
         if: inputs.run-lint
-        run: npm run lint
+        run: ${{ inputs.package-manager }} run lint
 
       - name: Format check
         if: inputs.run-format-check
-        run: npm run format:check
+        run: ${{ inputs.package-manager }} run format:check
 
       - name: Type check
         if: inputs.run-typecheck
-        run: npm run typecheck
+        run: ${{ inputs.package-manager }} run typecheck
 
       - name: Build
         if: inputs.run-build
-        run: npm run build
+        run: ${{ inputs.package-manager }} run build
 
       - name: Test
         if: inputs.run-test
-        run: npm test
+        run: ${{ inputs.package-manager }} test
