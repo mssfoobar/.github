@@ -127,7 +127,7 @@ jobs:
 
             if (changed.length === 0) {
               console.log('No packages changed — nothing to publish.');
-              return;
+              process.exit(0);
             }
 
             console.log('Publishing ' + changed.length + ' package(s) with --tag ' + npmTag + ':');
