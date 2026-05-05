@@ -50,13 +50,13 @@ jobs:
           fi
 
       - name: Checkout repository
-        if: steps.auth.outputs.method != 'skip'
+        if: success() && steps.auth.outputs.method == 'api_key'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Run Claude Code Review
-        if: steps.auth.outputs.method != 'skip'
+        if: success() && steps.auth.outputs.method == 'api_key'
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
