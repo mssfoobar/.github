@@ -1,0 +1,40 @@
+name: Changeset Check
+
+# Reusable required-status check that enforces every PR carries a
+# changeset (or marker-less changeset for no-bump changes). Skips:
+#   * the changesets/action's own version PR (head ref starts with
+#     `changeset-release/`) — that PR by design contains zero pending
+#     changesets because it has just consumed them.
+#   * dependabot PRs — mechanical dep bumps don't merit changesets in
+#     the lazy + snapshot model; they roll into the next regular release.
+#
+# Pair with npm-pr-validation in a calling workflow that triggers on
+# `pull_request: branches: [<integration-branch>]`. Both should be
+# marked as required status checks on the integration branch's ruleset.
+
+on:
+  workflow_call:
+
+jobs:
+  check:
+    name: Check
+    if: ${{ !startsWith(github.head_ref, 'changeset-release/') && github.actor != 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify changeset present
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git diff --name-only --diff-filter=AM "$BASE_SHA...$HEAD_SHA" | grep -E '^\.changeset/[^/]+\.md$' | grep -v '^\.changeset/README\.md$' >/dev/null; then
+            echo "Changeset found."
+          else
+            echo "::error::No changeset in this PR. Run \`npx changeset\` to add one, or add a marker-less changeset (empty frontmatter) for docs/CI/comment-only changes."
+            exit 1
+          fi

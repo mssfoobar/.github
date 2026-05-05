@@ -203,6 +203,180 @@ jobs:
             DEPLOYMENT_APP_PRIVATE_KEY: ${{ secrets.DEPLOYMENT_APP_PRIVATE_KEY }}
 ```
 
+## NPM Lazy + Snapshot Release Pattern
+
+Four reusable workflows for npm projects (single package or multi-package
+workspaces) that follow the **lazy + snapshot release** model. The pattern:
+
+| Branch     | Trigger    | What runs               | Dist-tag |
+|------------|------------|-------------------------|----------|
+| `develop`  | every push | snapshot publish        | `@alpha` |
+| `*/rc`     | every push | snapshot publish        | `@next`  |
+| `main`     | every push | stable publish          | `@latest`|
+
+**Lazy version bumps**: `changeset version` (the real one, no `--snapshot`)
+runs only at the actual release ceremony — manually on the rc branch before
+opening the rc → main PR. develop and rc publish snapshots that mutate
+package.json transiently in CI and never commit. This avoids GitHub's
+anti-recursion gotcha entirely (`GITHUB_TOKEN`-authenticated pushes don't
+trigger downstream workflows), so plain `GITHUB_TOKEN` is sufficient — no PAT
+or App-token needed.
+
+**Per-package detection** in `npm-snapshot-publish` ensures only packages
+whose version actually changed (because a pending changeset affected them)
+are published; unchanged packages are skipped.
+
+Canonical implementation: see [mssfoobar/aa-cli](https://github.com/mssfoobar/aa-cli).
+
+### Workflows
+
+#### `npm-pr-validation.yml`
+
+PR-validation gate. Runs lint / format-check (both opt-in) / typecheck /
+build / test from the repo root or a working directory.
+
+```yaml
+on:
+  pull_request:
+    branches: [develop]
+jobs:
+  validate:
+    uses: mssfoobar/.github/.github/workflows/npm-pr-validation.yml@main
+    with:
+      node-version: '20'
+      run-lint: true
+      run-format-check: true
+```
+
+#### `changeset-check.yml`
+
+Required check that enforces every PR carries a `.changeset/*.md` file (or
+marker-less changeset for no-bump changes). Skips dependabot PRs and the
+`changeset-release/*` branch automatically.
+
+```yaml
+on:
+  pull_request:
+    branches: [develop]
+jobs:
+  check:
+    uses: mssfoobar/.github/.github/workflows/changeset-check.yml@main
+```
+
+#### `npm-snapshot-publish.yml`
+
+Publishes a snapshot version on every push to develop or `*/rc`. Mutates
+package.json transiently via `changeset version --snapshot=<tag>.<run_number>`,
+then publishes only packages whose version actually changed. Versions look
+like `0.1.0-alpha.123` (paired with `prereleaseTemplate: "{tag}"` in
+`.changeset/config.json`).
+
+```yaml
+on:
+  push:
+    branches: [develop, '*/rc']
+jobs:
+  publish-alpha:
+    if: github.ref == 'refs/heads/develop'
+    uses: mssfoobar/.github/.github/workflows/npm-snapshot-publish.yml@main
+    with:
+      tag: alpha
+      scope: '@mssfoobar'
+
+  publish-rc:
+    if: endsWith(github.ref, '/rc')
+    uses: mssfoobar/.github/.github/workflows/npm-snapshot-publish.yml@main
+    with:
+      tag: rc
+      scope: '@mssfoobar'
+```
+
+The consuming repo must define `release:alpha` and `release:rc` npm scripts
+in its root `package.json`. Example:
+
+```json
+{
+  "scripts": {
+    "release:alpha": "npm publish --workspaces --tag alpha",
+    "release:rc":    "npm publish --workspaces --tag next"
+  }
+}
+```
+
+(Single-package repos drop `--workspaces`.)
+
+#### `npm-stable-publish.yml`
+
+Publishes the stable release on push to main, after the rc → main PR has
+merged with a real `changeset version` commit baked in. Uses
+`changesets/action@v1` in publish mode — idempotent, only publishes
+packages whose version isn't already on the registry, creates a GitHub
+Release per published package.
+
+```yaml
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    uses: mssfoobar/.github/.github/workflows/npm-stable-publish.yml@main
+    with:
+      scope: '@mssfoobar'
+```
+
+The consuming repo must define `release:stable`:
+
+```json
+{
+  "scripts": {
+    "release:stable": "npm publish --workspaces"
+  }
+}
+```
+
+### Required `.changeset/config.json` block
+
+```json
+{
+  "snapshot": {
+    "useCalculatedVersion": true,
+    "prereleaseTemplate": "{tag}"
+  }
+}
+```
+
+`useCalculatedVersion: true` makes the snapshot reflect the natural
+next-version trajectory (`0.1.0-alpha.123` rather than `0.0.0-alpha.123`).
+`prereleaseTemplate: "{tag}"` is a passthrough — the snapshot id from the
+CLI becomes the entire prerelease portion.
+
+### Branch protection — required checks
+
+On the integration branch (typically `develop`):
+- `validate` (from `npm-pr-validation.yml`)
+- `check` (from `changeset-check.yml`)
+
+On main:
+- `validate` only (`check` only fires on PRs into develop).
+
+No bypass actors needed — nothing CI-driven pushes to a protected branch.
+
+### When to use the eager pattern instead
+
+`npm-changeset-release.yml` and `monorepo-changeset-release.yml` (also in
+this repo) use the older **eager-bump** pattern: every push to the watched
+branch consumes pending changesets and commits a version bump back to the
+branch. They require a GitHub App with branch-protection bypass to push
+through ruleset gating. Use them when:
+
+- You want each commit on develop tied to a specific deterministic version
+  (rather than internal testers tracking `@alpha`).
+- The team prefers the eager-bump audit trail over the lazy ceremony.
+
+The lazy + snapshot pattern is the recommended default for new npm
+projects. See [aa-cli's git history](https://github.com/mssfoobar/aa-cli/pulls?q=AOH-7029)
+for the journey of trade-offs that led to it.
+
 ## Troubleshooting
 
 Common issues and solutions:
