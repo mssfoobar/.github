@@ -82,7 +82,6 @@ jobs:
           fetch-depth: 0
 
       - name: Validate inputs
-        working-directory: '.'
         env:
           PM: ${{ inputs.package-manager }}
         run: |
@@ -124,7 +123,18 @@ jobs:
           node -e "
             const fs = require('fs');
             const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            // Supported: array of literal paths, or absent (single-package mode).
+            // Unsupported: glob patterns and the object form. Fail explicitly
+            // rather than silently missing packages.
+            if (root.workspaces && !Array.isArray(root.workspaces)) {
+              throw new Error('Object form of package.json#workspaces is not supported. Use an array of literal workspace paths or migrate to pnpm (package-manager: pnpm).');
+            }
             const workspaces = root.workspaces || [];
+            for (const p of workspaces) {
+              if (p.includes('*')) {
+                throw new Error('Glob patterns in package.json#workspaces (\\'' + p + '\\') are not supported. Expand to literal paths or migrate to pnpm (package-manager: pnpm), which resolves workspaces via pnpm-workspace.yaml.');
+              }
+            }
             const targets = workspaces.length ? workspaces : ['.'];
             const versions = {};
             for (const ws of targets) {

@@ -81,7 +81,6 @@ jobs:
           fetch-depth: 0
 
       - name: Validate inputs
-        working-directory: '.'
         env:
           PM: ${{ inputs.package-manager }}
         run: |

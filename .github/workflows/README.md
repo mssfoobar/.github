@@ -13,8 +13,8 @@ This repository contains four main reusable workflows:
     - **Java** (`.github/workflows/java-docker-build-push.yml`): Builds and publishes container
       images for Java applications.
     - **Golang** (`.github/workflows/golang-docker-build-push.yml`): Builds and publishes container
-      images for Node.js applications.
-    - **Web (NodeJS)** (`.github/workflows/web-docker-build-push`): Builds and publishes Node.jscontainer
+      images for Go applications.
+    - **Web (NodeJS)** (`.github/workflows/web-docker-build-push`): Builds and publishes Node.js container
       images for `web-base`-based applications
 
 ## Prerequisites
