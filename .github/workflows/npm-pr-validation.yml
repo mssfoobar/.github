@@ -73,6 +73,16 @@ on:
         required: false
         type: boolean
         default: true
+      run-audit:
+        required: false
+        type: boolean
+        default: false
+        description: '(opt-in) Run `npm audit --omit=dev` / `pnpm audit --prod` after install. Fails the job on any advisory at `audit-severity` or above.'
+      audit-severity:
+        required: false
+        type: string
+        default: 'high'
+        description: '(audit only) Minimum advisory severity that fails the job: `info`, `low`, `moderate`, `high`, or `critical`. Default `high`.'
 
 jobs:
   validate:
@@ -139,6 +149,18 @@ jobs:
         run: pnpm install --frozen-lockfile
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Audit (npm)
+        if: inputs.run-audit && inputs.package-manager == 'npm'
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-severity }}
+        run: npm audit --omit=dev --audit-level="$AUDIT_LEVEL"
+
+      - name: Audit (pnpm)
+        if: inputs.run-audit && inputs.package-manager == 'pnpm'
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-severity }}
+        run: pnpm audit --prod --audit-level "$AUDIT_LEVEL"
 
       - name: Lint
         if: inputs.run-lint
