@@ -10,6 +10,18 @@ name: NPM Snapshot Publish
 # are published. Packages whose version didn't move are skipped — their
 # existing registry version remains current.
 #
+# Manager-specific notes:
+#   * npm path enumerates `package.json#workspaces`. The repo root is
+#     never included unless `workspaces` is empty (single-package mode).
+#   * pnpm path enumerates `pnpm list -r --depth=-1 --json`, which DOES
+#     include the workspace root. We rely on the root being `private:
+#     true` (the standard convention for a monorepo root) to filter it
+#     out. A non-private root would publish — keep your root private.
+#   * pnpm publish rewrites `workspace:*` / `workspace:^` deps to
+#     concrete versions on the fly; npm publish does not. The publish
+#     paths are split partly because of this — don't try to unify them
+#     without re-validating against an aoh-web-lib-style workspace.
+#
 # The snapshot id is `<tag>.<github.run_number>`, producing clean
 # sequential versions like `0.1.0-alpha.123` (paired with a changesets
 # config that has `prereleaseTemplate: "{tag}"` and
@@ -25,7 +37,17 @@ on:
       tag:
         required: true
         type: string
-        description: 'Snapshot id prefix and release-script suffix. Use "alpha" for develop pushes, "rc" for */rc pushes. The workflow runs `npm run release:<tag>`.'
+        description: 'Snapshot id prefix and release-script suffix. Use "alpha" for develop pushes, "rc" for */rc pushes.'
+      package-manager:
+        required: false
+        type: string
+        default: 'npm'
+        description: 'Package manager — `npm` or `pnpm`. With `pnpm`, the workflow installs pnpm via pnpm/action-setup, reads workspace packages via `pnpm list -r --depth=-1 --json`, and publishes via `pnpm --filter "./<path>" publish --no-git-checks` (path-based filter, mirroring the npm path''s `--workspace <path>`). Consumers using `pnpm` MUST either declare `packageManager` in root `package.json` or pass `pnpm-version` below.'
+      pnpm-version:
+        required: false
+        type: string
+        default: ''
+        description: '(pnpm only) Explicit pnpm version, e.g. `10.16.1`. If empty, pnpm/action-setup resolves the version from `package.json#packageManager`. Ignored for npm.'
       node-version:
         required: false
         type: string
@@ -34,10 +56,16 @@ on:
         required: true
         type: string
         description: 'npm scope for GitHub Packages auth (e.g. "@mssfoobar")'
+      cache-dependency-path:
+        required: false
+        type: string
+        default: ''
+        description: 'Path to lockfile for setup-node cache key. Defaults to `package-lock.json` for npm and `pnpm-lock.yaml` for pnpm.'
       legacy-peer-deps:
         required: false
         type: boolean
         default: false
+        description: '(npm only) Pass `--legacy-peer-deps` to `npm ci`. Ignored for pnpm.'
 
 jobs:
   publish:
@@ -53,25 +81,63 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate inputs
+        env:
+          PM: ${{ inputs.package-manager }}
+        run: |
+          case "$PM" in
+            npm|pnpm) ;;
+            *) echo "::error::package-manager must be 'npm' or 'pnpm', got '$PM'"; exit 1 ;;
+          esac
+
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
       - name: Set up Node + GitHub Packages registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path != '' && inputs.cache-dependency-path || (inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json') }}
           registry-url: 'https://npm.pkg.github.com'
           scope: ${{ inputs.scope }}
 
-      - name: Install
+      - name: Install (npm)
+        if: inputs.package-manager == 'npm'
         run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Snapshot pre-bump versions
+      - name: Install (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Snapshot pre-bump versions (npm)
+        if: inputs.package-manager == 'npm'
         run: |
           node -e "
             const fs = require('fs');
             const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            // Supported: array of literal paths, or absent (single-package mode).
+            // Unsupported: glob patterns and the object form. Fail explicitly
+            // rather than silently missing packages.
+            if (root.workspaces && !Array.isArray(root.workspaces)) {
+              throw new Error('Object form of package.json#workspaces is not supported. Use an array of literal workspace paths or migrate to pnpm (package-manager: pnpm).');
+            }
             const workspaces = root.workspaces || [];
+            for (const p of workspaces) {
+              if (typeof p !== 'string') {
+                throw new Error('Unsupported entry in package.json#workspaces (' + JSON.stringify(p) + '). Only string paths are supported. Migrate to pnpm (package-manager: pnpm) for richer workspace config.');
+              }
+              if (p.includes('*')) {
+                throw new Error('Glob patterns in package.json#workspaces (\\'' + p + '\\') are not supported. Expand to literal paths, or migrate to pnpm (package-manager: pnpm) and declare globs in pnpm-workspace.yaml.');
+              }
+            }
             const targets = workspaces.length ? workspaces : ['.'];
             const versions = {};
             for (const ws of targets) {
@@ -91,6 +157,38 @@ jobs:
             }
           "
 
+      - name: Snapshot pre-bump versions (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
+            const out = execSync('pnpm list -r --depth=-1 --json', { encoding: 'utf8' });
+            let list;
+            try {
+              list = JSON.parse(out);
+            } catch (e) {
+              console.error('Failed to parse pnpm list output. First 500 chars:');
+              console.error(out.slice(0, 500));
+              throw e;
+            }
+            if (!Array.isArray(list)) {
+              throw new Error('pnpm list -r --json did not return an array; got: ' + typeof list);
+            }
+            const versions = {};
+            for (const pkg of list) {
+              if (pkg.private) continue;
+              const rel = path.relative(process.cwd(), pkg.path) || '.';
+              versions[pkg.name] = { version: pkg.version, path: rel };
+            }
+            fs.writeFileSync('/tmp/pre-versions.json', JSON.stringify(versions));
+            console.log('Pre-bump versions:');
+            for (const [name, info] of Object.entries(versions)) {
+              console.log('  ' + name + ' @ ' + info.version + ' (' + info.path + ')');
+            }
+          "
+
       - name: Compute snapshot version
         run: npx changeset version --snapshot=${{ inputs.tag }}.${{ github.run_number }}
 
@@ -98,6 +196,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
+          PM: ${{ inputs.package-manager }}
         run: |
           # rc → npm dist-tag "next"; everything else uses tag verbatim
           NPM_TAG=$([ "$TAG" = "rc" ] && echo "next" || echo "$TAG")
@@ -107,20 +206,16 @@ jobs:
             const fs = require('fs');
             const { execSync } = require('child_process');
             const pre = JSON.parse(fs.readFileSync('/tmp/pre-versions.json', 'utf8'));
-            const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            const workspaces = root.workspaces || [];
-            const targets = workspaces.length ? workspaces : ['.'];
             const npmTag = process.env.NPM_TAG;
+            const pm = process.env.PM;
 
             const changed = [];
-            for (const ws of targets) {
-              const path = ws === '.' ? 'package.json' : ws + '/package.json';
+            for (const [name, info] of Object.entries(pre)) {
+              const pkgPath = info.path === '.' ? 'package.json' : info.path + '/package.json';
               try {
-                const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
-                if (pkg.private) continue;
-                const oldVersion = pre[pkg.name]?.version;
-                if (oldVersion && oldVersion !== pkg.version) {
-                  changed.push({ name: pkg.name, path: ws, oldVersion, newVersion: pkg.version });
+                const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                if (info.version !== pkg.version) {
+                  changed.push({ name, path: info.path, oldVersion: info.version, newVersion: pkg.version });
                 }
               } catch {}
             }
@@ -135,9 +230,18 @@ jobs:
               console.log('  ' + pkg.name + ': ' + pkg.oldVersion + ' → ' + pkg.newVersion);
             }
             for (const pkg of changed) {
-              const cmd = pkg.path === '.'
-                ? 'npm publish --tag ' + npmTag
-                : 'npm publish --workspace ' + pkg.path + ' --tag ' + npmTag;
+              let cmd;
+              if (pm === 'pnpm') {
+                // Path-based filter (mirrors npm's --workspace <path>):
+                // unambiguous, immune to scoped-name parsing quirks, no
+                // collision risk if two workspaces ever share a name.
+                const filter = pkg.path === '.' ? '.' : './' + pkg.path;
+                cmd = 'pnpm --filter \"' + filter + '\" publish --tag ' + npmTag + ' --no-git-checks';
+              } else {
+                cmd = pkg.path === '.'
+                  ? 'npm publish --tag ' + npmTag
+                  : 'npm publish --workspace ' + pkg.path + ' --tag ' + npmTag;
+              }
               console.log('\\n\$ ' + cmd);
               execSync(cmd, { stdio: 'inherit' });
             }

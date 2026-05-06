@@ -13,6 +13,17 @@ name: NPM Stable Publish
 # `createGithubReleases: true` produces a GitHub Release for each newly
 # published package. Pre-release versions are auto-marked as
 # "Pre-release" in GitHub's UI.
+#
+# release-script note: changesets/action@v1 parses the publish command's
+# stdout to detect what got published and create matching GitHub
+# Releases. The parser expects the format produced by `changeset
+# publish`. Running `npm publish --workspaces` or `pnpm publish -r`
+# directly publishes successfully but the action can't extract
+# package@version pairs, so `createGithubReleases` silently no-ops.
+# Recommended `release:stable` for both managers: `changeset publish`.
+# Both npm-run and pnpm-run inject `./node_modules/.bin` into PATH, so
+# the bare `changeset` resolves correctly under either manager — no
+# `pnpm exec` or `npx` prefix needed.
 
 on:
   workflow_call:
@@ -21,7 +32,17 @@ on:
         required: false
         type: string
         default: 'release:stable'
-        description: 'npm script the action runs to actually publish (e.g. "release:stable", "release"). Should publish all workspace packages with the default `latest` dist-tag.'
+        description: 'Script the action runs to actually publish (e.g. "release:stable", "release"). Should publish all workspace packages with the default `latest` dist-tag.'
+      package-manager:
+        required: false
+        type: string
+        default: 'npm'
+        description: 'Package manager — `npm` or `pnpm`. Affects install + how the release script is invoked. Consumers using `pnpm` MUST either declare `packageManager` in root `package.json` or pass `pnpm-version` below.'
+      pnpm-version:
+        required: false
+        type: string
+        default: ''
+        description: '(pnpm only) Explicit pnpm version, e.g. `10.16.1`. If empty, pnpm/action-setup resolves the version from `package.json#packageManager`. Ignored for npm.'
       node-version:
         required: false
         type: string
@@ -30,6 +51,11 @@ on:
         required: true
         type: string
         description: 'npm scope for GitHub Packages auth (e.g. "@mssfoobar")'
+      cache-dependency-path:
+        required: false
+        type: string
+        default: ''
+        description: 'Path to lockfile for setup-node cache key. Defaults to `package-lock.json` for npm and `pnpm-lock.yaml` for pnpm.'
       create-github-releases:
         required: false
         type: boolean
@@ -38,6 +64,7 @@ on:
         required: false
         type: boolean
         default: false
+        description: '(npm only) Pass `--legacy-peer-deps` to `npm ci`. Ignored for pnpm.'
 
 jobs:
   publish:
@@ -53,23 +80,46 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate inputs
+        env:
+          PM: ${{ inputs.package-manager }}
+        run: |
+          case "$PM" in
+            npm|pnpm) ;;
+            *) echo "::error::package-manager must be 'npm' or 'pnpm', got '$PM'"; exit 1 ;;
+          esac
+
+      - name: Set up pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
       - name: Set up Node + GitHub Packages registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path != '' && inputs.cache-dependency-path || (inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json') }}
           registry-url: 'https://npm.pkg.github.com'
           scope: ${{ inputs.scope }}
 
-      - name: Install
+      - name: Install (npm)
+        if: inputs.package-manager == 'npm'
         run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm install --frozen-lockfile
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish via changesets/action
         uses: changesets/action@v1
         with:
-          publish: npm run ${{ inputs.release-script }}
+          publish: ${{ inputs.package-manager }} run ${{ inputs.release-script }}
           createGithubReleases: ${{ inputs.create-github-releases }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

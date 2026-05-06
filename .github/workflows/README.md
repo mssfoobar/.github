@@ -13,8 +13,8 @@ This repository contains four main reusable workflows:
     - **Java** (`.github/workflows/java-docker-build-push.yml`): Builds and publishes container
       images for Java applications.
     - **Golang** (`.github/workflows/golang-docker-build-push.yml`): Builds and publishes container
-      images for Node.js applications.
-    - **Web (NodeJS)** (`.github/workflows/web-docker-build-push`): Builds and publishes Node.jscontainer
+      images for Go applications.
+    - **Web (NodeJS)** (`.github/workflows/web-docker-build-push`): Builds and publishes Node.js container
       images for `web-base`-based applications
 
 ## Prerequisites
@@ -228,6 +228,32 @@ are published; unchanged packages are skipped.
 
 Canonical implementation: see [mssfoobar/aa-cli](https://github.com/mssfoobar/aa-cli).
 
+### Package manager
+
+All three workflows that install dependencies (`npm-pr-validation`,
+`npm-snapshot-publish`, `npm-stable-publish`) accept a `package-manager`
+input — `npm` (default) or `pnpm`. With `pnpm`, the workflow installs pnpm
+via `pnpm/action-setup`, uses `pnpm install --frozen-lockfile`, caches
+`pnpm-lock.yaml`, and invokes scripts via `pnpm <script>`. The snapshot
+publish reusable additionally swaps its per-package detection from reading
+`package.json#workspaces` to `pnpm list -r --depth=-1 --json`, and publishes
+via `pnpm --filter "./<path>" publish --no-git-checks` (path-based filter,
+mirroring the npm path's `--workspace <path>`).
+
+**Prerequisite for `pnpm`:** consumers must either declare `packageManager`
+in their root `package.json` (preferred — locks the same version locally
+and in CI) **or** pass `pnpm-version` to the reusable. Without one of
+these, `pnpm/action-setup` errors. Example:
+
+```json
+{
+  "packageManager": "pnpm@10.16.1"
+}
+```
+
+`changeset-check.yml` doesn't install anything, so it has no
+`package-manager` input.
+
 ### Workflows
 
 #### `npm-pr-validation.yml`
@@ -291,19 +317,25 @@ jobs:
       scope: '@mssfoobar'
 ```
 
-The consuming repo must define `release:alpha` and `release:rc` npm scripts
-in its root `package.json`. Example:
+For a pnpm consumer, add `package-manager: pnpm` to each job's `with:`
+block:
 
-```json
-{
-  "scripts": {
-    "release:alpha": "npm publish --workspaces --tag alpha",
-    "release:rc":    "npm publish --workspaces --tag next"
-  }
-}
+```yaml
+  publish-alpha:
+    if: github.ref == 'refs/heads/develop'
+    uses: mssfoobar/.github/.github/workflows/npm-snapshot-publish.yml@main
+    with:
+      tag: alpha
+      scope: '@mssfoobar'
+      package-manager: pnpm
 ```
 
-(Single-package repos drop `--workspaces`.)
+(Pin the pnpm version via `package.json#packageManager` in the consumer
+— see [Package manager](#package-manager) above.)
+
+The consuming repo doesn't need to define a `release:<tag>` script — this
+workflow runs `changeset version --snapshot=<tag>.<run_number>` itself,
+detects which packages got bumped, and publishes them directly.
 
 #### `npm-stable-publish.yml`
 
@@ -324,15 +356,26 @@ jobs:
       scope: '@mssfoobar'
 ```
 
-The consuming repo must define `release:stable`:
+The consuming repo must define `release:stable`. Use `changeset publish`
+— **not** `npm publish --workspaces` or `pnpm publish -r`. `changesets/
+action@v1` parses the publish command's stdout to detect what got
+published and create matching GitHub Releases; only `changeset publish`'s
+output format is recognised. The other commands publish successfully but
+silently produce no Releases.
 
 ```json
 {
   "scripts": {
-    "release:stable": "npm publish --workspaces"
+    "release:stable": "changeset publish"
   }
 }
 ```
+
+`changeset publish` works for both npm and pnpm consumers — it calls
+`npm publish` per workspace internally. Crucially, `changeset version`
+(run on the rc branch before opening the rc → main PR) normalises any
+`workspace:*` / `workspace:^` dep ranges to concrete versions, so
+`changeset publish` doesn't need pnpm's runtime rewriting.
 
 ### Required `.changeset/config.json` block
 
