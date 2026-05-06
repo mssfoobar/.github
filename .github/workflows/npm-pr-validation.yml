@@ -21,6 +21,11 @@ on:
         type: string
         default: ''
         description: '(pnpm only) Explicit pnpm version, e.g. `10.16.1`. If empty, pnpm/action-setup resolves the version from `package.json#packageManager`. Ignored for npm.'
+      scope:
+        required: false
+        type: string
+        default: ''
+        description: 'NPM scope to wire to the GitHub Packages registry, e.g. `@mssfoobar`. When set, `setup-node` writes a user-level `.npmrc` with `<scope>:registry=https://npm.pkg.github.com` and `//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}`. Required if any install dep (including optional peers pnpm resolves into the lockfile) lives on GitHub Packages and the consumer does not already pin the registry in a checked-in `.npmrc`. Mirrors the publish reusables.'
       node-version:
         required: false
         type: string
@@ -74,6 +79,13 @@ jobs:
     name: Validate
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Be self-sufficient about token scope rather than inheriting from the
+    # caller. Many consumer workflows don't declare `packages: read` (or run
+    # under restricted-default tokens), which would silently 401 the install
+    # for any private @org dep. Mirrors the publish reusables.
+    permissions:
+      contents: read
+      packages: read
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -97,22 +109,36 @@ jobs:
         with:
           version: ${{ inputs.pnpm-version }}
 
-      - name: Set up Node
+      - name: Set up Node + GitHub Packages registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ inputs.package-manager }}
           cache-dependency-path: ${{ inputs.cache-dependency-path != '' && inputs.cache-dependency-path || (inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json') }}
+          # Wire the GitHub Packages registry for the supplied scope so
+          # `NODE_AUTH_TOKEN` resolves at install time. Pairs with the env
+          # block on the install steps; one without the other is a no-op.
+          registry-url: 'https://npm.pkg.github.com'
+          scope: ${{ inputs.scope }}
 
       - name: Install (npm)
         if: inputs.package-manager == 'npm'
         working-directory: ${{ inputs.install-from-root && '.' || inputs.working-directory }}
         run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+        env:
+          # Authenticate against GitHub Packages for private @mssfoobar deps.
+          # The publish reusables already export this; PR-validation was
+          # missing it. With pnpm + optional peers, fresh CI installs hit
+          # ERR_PNPM_FETCH_401 without it (npm escapes today only because
+          # `npm ci` doesn't materialize optional peer deps).
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install (pnpm)
         if: inputs.package-manager == 'pnpm'
         working-directory: '.'
         run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lint
         if: inputs.run-lint
