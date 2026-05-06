@@ -108,11 +108,20 @@ jobs:
         if: inputs.package-manager == 'npm'
         working-directory: ${{ inputs.install-from-root && '.' || inputs.working-directory }}
         run: npm ci ${{ inputs.legacy-peer-deps && '--legacy-peer-deps' || '' }}
+        env:
+          # Authenticate against GitHub Packages for private @mssfoobar deps.
+          # The publish reusables already export this; PR-validation was
+          # missing it. With pnpm + optional peers, fresh CI installs hit
+          # ERR_PNPM_FETCH_401 without it (npm escapes today only because
+          # `npm ci` doesn't materialize optional peer deps).
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install (pnpm)
         if: inputs.package-manager == 'pnpm'
         working-directory: '.'
         run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lint
         if: inputs.run-lint
