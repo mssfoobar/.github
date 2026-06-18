@@ -66,6 +66,16 @@ on:
         type: boolean
         default: false
         description: '(npm only) Pass `--legacy-peer-deps` to `npm ci`. Ignored for pnpm.'
+      skip-unchanged-content:
+        required: false
+        type: boolean
+        default: false
+        description: 'When true, gate publishing on git content change: only publish a version-moved package when its own dir (or a workspace-dep dir, transitively) changed in github.event.before..HEAD. Avoids republishing packages bumped only by a long-lived pending changeset. Falls back to publishing all version-moved packages when the push base ref is unavailable (workflow_dispatch, first push, or force-push).'
+      dry-run:
+        required: false
+        type: boolean
+        default: false
+        description: 'When true, log the publish/skip decision per package and publish nothing.'
 
 jobs:
   publish:
@@ -197,6 +207,11 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
           PM: ${{ inputs.package-manager }}
+          SKIP_UNCHANGED: ${{ inputs.skip-unchanged-content }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           # rc → npm dist-tag "next"; everything else uses tag verbatim
           NPM_TAG=$([ "$TAG" = "rc" ] && echo "next" || echo "$TAG")
@@ -208,39 +223,96 @@ jobs:
             const pre = JSON.parse(fs.readFileSync('/tmp/pre-versions.json', 'utf8'));
             const npmTag = process.env.NPM_TAG;
             const pm = process.env.PM;
+            const skipUnchanged = process.env.SKIP_UNCHANGED === 'true';
+            const dryRun = process.env.DRY_RUN === 'true';
 
-            const changed = [];
+            // ---- pure helpers (mirror of dev-tested snapshot-gate.mjs) ----
+            const underDir = (file, dir) => dir === '.' ? true : file === dir || file.startsWith(dir + '/');
+            function computePublishSet(candidates, changedPaths, depGraph) {
+              const direct = new Set(candidates.filter(c => changedPaths.some(f => underDir(f, c.path))).map(c => c.name));
+              const result = new Set(direct);
+              let grew = true;
+              while (grew) {
+                grew = false;
+                for (const c of candidates) {
+                  if (result.has(c.name)) continue;
+                  if ((depGraph[c.name] || []).some(d => result.has(d))) { result.add(c.name); grew = true; }
+                }
+              }
+              return result;
+            }
+            function buildDepGraph(candidates) {
+              const names = new Set(candidates.map(c => c.name));
+              const graph = {};
+              for (const c of candidates) {
+                let pkg = {};
+                const rel = c.path === '.' ? 'package.json' : c.path + '/package.json';
+                try { pkg = JSON.parse(execSync('git show HEAD:' + rel, { encoding: 'utf8' })); } catch {}
+                const deps = [];
+                for (const sect of ['dependencies', 'optionalDependencies']) {
+                  for (const [dn, spec] of Object.entries(pkg[sect] || {})) {
+                    if (typeof spec === 'string' && spec.startsWith('workspace:') && names.has(dn)) deps.push(dn);
+                  }
+                }
+                graph[c.name] = deps;
+              }
+              return graph;
+            }
+            function resolveBase(eventName, baseSha, headSha) {
+              if (eventName !== 'push') return null;
+              if (!baseSha || /^0+\$/.test(baseSha)) return null;
+              try { execSync('git merge-base --is-ancestor ' + baseSha + ' ' + headSha, { stdio: 'ignore' }); }
+              catch { return null; }
+              return baseSha;
+            }
+
+            // ---- candidate set: packages whose version moved (existing logic) ----
+            const candidates = [];
             for (const [name, info] of Object.entries(pre)) {
               const pkgPath = info.path === '.' ? 'package.json' : info.path + '/package.json';
               try {
                 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-                if (info.version !== pkg.version) {
-                  changed.push({ name, path: info.path, oldVersion: info.version, newVersion: pkg.version });
-                }
+                if (info.version !== pkg.version) candidates.push({ name, path: info.path, oldVersion: info.version, newVersion: pkg.version });
               } catch {}
             }
 
-            if (changed.length === 0) {
-              console.log('No packages changed — nothing to publish.');
-              process.exit(0);
+            // ---- content gate ----
+            let toPublish = candidates;
+            if (skipUnchanged && candidates.length) {
+              const base = resolveBase(process.env.EVENT_NAME, process.env.BASE_SHA, process.env.HEAD_SHA);
+              if (base === null) {
+                console.log('Content gate: base ref unavailable (' + process.env.EVENT_NAME + ') — publishing all ' + candidates.length + ' version-moved package(s).');
+              } else {
+                const changedPaths = execSync('git diff --name-only ' + base + ' ' + process.env.HEAD_SHA, { encoding: 'utf8' }).split('\\n').filter(Boolean);
+                const keep = computePublishSet(candidates, changedPaths, buildDepGraph(candidates));
+                const skipped = candidates.filter(c => !keep.has(c.name));
+                toPublish = candidates.filter(c => keep.has(c.name));
+                console.log('Content gate (base ' + base.slice(0, 9) + '..' + process.env.HEAD_SHA.slice(0, 9) + '):');
+                for (const c of toPublish) console.log('  publish  ' + c.name);
+                for (const c of skipped) console.log('  skip     ' + c.name + ' (content unchanged)');
+              }
             }
 
-            console.log('Publishing ' + changed.length + ' package(s) with --tag ' + npmTag + ':');
-            for (const pkg of changed) {
+            if (dryRun) {
+              console.log('\\n[dry-run] would publish ' + toPublish.length + ' package(s); publishing nothing.');
+              process.exit(0);
+            }
+            if (toPublish.length === 0) { console.log('No packages to publish.'); process.exit(0); }
+
+            console.log('Publishing ' + toPublish.length + ' package(s) with --tag ' + npmTag + ':');
+            for (const pkg of toPublish) {
               console.log('  ' + pkg.name + ': ' + pkg.oldVersion + ' → ' + pkg.newVersion);
             }
-            for (const pkg of changed) {
+            for (const pkg of toPublish) {
               let cmd;
               if (pm === 'pnpm') {
-                // Path-based filter (mirrors npm's --workspace <path>):
-                // unambiguous, immune to scoped-name parsing quirks, no
-                // collision risk if two workspaces ever share a name.
+                // Path-based filter (mirrors npm's --workspace <path>): unambiguous,
+                // immune to scoped-name parsing quirks, no collision if two
+                // workspaces ever share a name.
                 const filter = pkg.path === '.' ? '.' : './' + pkg.path;
                 cmd = 'pnpm --filter \"' + filter + '\" publish --tag ' + npmTag + ' --no-git-checks';
               } else {
-                cmd = pkg.path === '.'
-                  ? 'npm publish --tag ' + npmTag
-                  : 'npm publish --workspace ' + pkg.path + ' --tag ' + npmTag;
+                cmd = pkg.path === '.' ? 'npm publish --tag ' + npmTag : 'npm publish --workspace ' + pkg.path + ' --tag ' + npmTag;
               }
               console.log('\\n\$ ' + cmd);
               execSync(cmd, { stdio: 'inherit' });
