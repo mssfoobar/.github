@@ -7,6 +7,9 @@ name: Changeset Check
 #     changesets because it has just consumed them.
 #   * dependabot PRs — mechanical dep bumps don't merit changesets in
 #     the lazy + snapshot model; they roll into the next regular release.
+#   * release sync-back PRs whose head ref matches the opt-in
+#     `release-head-ref` input (e.g. `main`) — a main->develop release
+#     sync only deletes the consumed changesets and carries none.
 #
 # Pair with npm-pr-validation in a calling workflow that triggers on
 # `pull_request: branches: [<integration-branch>]`. Both should be
@@ -14,6 +17,12 @@ name: Changeset Check
 
 on:
   workflow_call:
+    inputs:
+      release-head-ref:
+        required: false
+        type: string
+        default: ''
+        description: 'Head branch of release sync-back PRs (e.g. "main"). A PR whose head ref matches is exempt from the changeset requirement — a release sync-back only deletes the consumed changesets and carries none. Empty (default) disables the exemption, so other consumers are unaffected.'
 
 jobs:
   check:
@@ -31,7 +40,17 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          RELEASE_HEAD_REF: ${{ inputs.release-head-ref }}
         run: |
+          # Release sync-back PRs (e.g. main -> develop) only delete the
+          # consumed changesets and carry none, so they are exempt when the
+          # caller opts in via the release-head-ref input. Exit 0 (success)
+          # rather than skipping the job, so the required check is satisfied.
+          if [ -n "$RELEASE_HEAD_REF" ] && [ "$HEAD_REF" = "$RELEASE_HEAD_REF" ]; then
+            echo "Release sync-back PR (head '$HEAD_REF') — exempt from the changeset requirement."
+            exit 0
+          fi
           if git diff --name-only --diff-filter=AM "$BASE_SHA...$HEAD_SHA" | grep -E '^\.changeset/[^/]+\.md$' | grep -v '^\.changeset/README\.md$' >/dev/null; then
             echo "Changeset found."
           else
