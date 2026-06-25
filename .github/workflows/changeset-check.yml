@@ -23,12 +23,17 @@ on:
         type: string
         default: ''
         description: 'Head branch of release sync-back PRs (e.g. "main"). A PR whose head ref matches is exempt from the changeset requirement — a release sync-back only deletes the consumed changesets and carries none. Empty (default) disables the exemption, so other consumers are unaffected.'
+      runner:
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+        description: 'Runner label to execute on. Defaults to GitHub-hosted ubuntu-latest; set to a self-hosted scale-set label (e.g. "arc-runner") to run the check on self-hosted runners.'
 
 jobs:
   check:
     name: Check
     if: ${{ !startsWith(github.head_ref, 'changeset-release/') && github.actor != 'dependabot[bot]' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 5
     steps:
       - name: Checkout
