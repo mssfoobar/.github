@@ -39,6 +39,12 @@ on:
                 type: string
                 description: "Optional. Team slug (e.g., 'dev-team') to request review from. If provided, a PR is created. Otherwise, changes are pushed directly."
                 default: ""
+            runner: 
+                required: false
+                type: string
+                default: 'ubuntu-latest'
+                description: 'Runner label to execute on. Defaults to GitHub-hosted ubuntu-latest; set to a self-hosted scale-set label (e.g. "arc-runner") to run the check on self-hosted runners.'
+
         secrets:
             DEPLOYMENT_APP_ID:
                 required: true
@@ -50,7 +56,7 @@ on:
 jobs:
     update-manifest:
         name: Update Deployment Manifest
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.runner }}
         steps:
             - name: Generate GitHub App Token
               uses: actions/create-github-app-token@v1
