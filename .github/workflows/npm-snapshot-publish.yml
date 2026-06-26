@@ -76,11 +76,16 @@ on:
         type: boolean
         default: false
         description: 'When true, log the publish/skip decision per package and publish nothing.'
+      runner:
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+        description: 'Runner label to execute on. Defaults to GitHub-hosted ubuntu-latest; set to a self-hosted scale-set label (e.g. "arc-runner") to run the publish on self-hosted runners.'
 
 jobs:
   publish:
     name: Publish snapshot (${{ inputs.tag }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 10
     permissions:
       contents: read
