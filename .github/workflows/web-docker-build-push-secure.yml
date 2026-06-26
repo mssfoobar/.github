@@ -23,6 +23,12 @@ on:
                 description: "ECR repository name. If provided, image will be pushed to both GHCR and ECR (requires AWS_ROLE_ARN, AWS_REGION, AWS_ACCOUNT_ID org vars)"
                 required: false
                 type: string
+            runner: 
+                required: false
+                type: string
+                default: 'ubuntu-latest'
+                description: 'Runner label to execute on. Defaults to GitHub-hosted ubuntu-latest; set to a self-hosted scale-set label (e.g. "arc-runner") to run the check on self-hosted runners.'
+
         outputs:
             image_tag:
                 description: "The full image tag that was built and pushed"
@@ -31,7 +37,7 @@ on:
 jobs:
     build-and-push:
         name: "Build & Publish Image"
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.runner }}
         permissions:
             contents: read
             packages: write
