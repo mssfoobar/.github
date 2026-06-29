@@ -38,6 +38,13 @@ jobs:
             - name: Checkout code
               uses: actions/checkout@v4
 
+            - name: Set up Node.js ${{ inputs.node-version }}
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: "npm"
+                  registry-url: ${{ inputs.npm-repository }}
+
             - name: Extract version from release tag
               id: version
               run: |
@@ -54,61 +61,8 @@ jobs:
                     exit 1
                   fi
 
-            - name: Determine paths and lockfile for caching
-              id: paths
-              working-directory: ${{ github.workspace }}
-              run: |
-                  ABS_INPUT_WORKING_DIR=$(realpath "${{ inputs.working-directory }}")
-                  echo "Input working directory (absolute): $ABS_INPUT_WORKING_DIR"
-
-                  if [ ! -d "$ABS_INPUT_WORKING_DIR" ]; then
-                    echo "::error::Input working directory '${{ inputs.working-directory }}' (resolved to '$ABS_INPUT_WORKING_DIR') does not exist."
-                    exit 1
-                  fi
-
-                  NPM_ROOT_OUTPUT_FROM_INPUT_WD=$(cd "$ABS_INPUT_WORKING_DIR" && npm root)
-                  EFFECTIVE_PROJECT_ROOT=$(dirname "$NPM_ROOT_OUTPUT_FROM_INPUT_WD")
-
-                  echo "effective_project_root=${EFFECTIVE_PROJECT_ROOT}" >> $GITHUB_OUTPUT
-                  echo "abs_input_working_dir=${ABS_INPUT_WORKING_DIR}" >> $GITHUB_OUTPUT
-
-                  # Determine the path to the package-lock.json for caching
-                  if [ "$EFFECTIVE_PROJECT_ROOT" == "$ABS_INPUT_WORKING_DIR" ]; then
-                    TARGET_LOCKFILE_PATH="${ABS_INPUT_WORKING_DIR}/package-lock.json"
-                  else
-                    TARGET_LOCKFILE_PATH="${EFFECTIVE_PROJECT_ROOT}/package-lock.json"
-                  fi
-
-                  if [ -f "$TARGET_LOCKFILE_PATH" ]; then
-                    echo "lock_file_for_cache=$TARGET_LOCKFILE_PATH" >> $GITHUB_OUTPUT
-                  else
-                    echo "lock_file_for_cache=**/package-lock.json" >> $GITHUB_OUTPUT
-                    echo "::warning::Lockfile not found at '$TARGET_LOCKFILE_PATH'. Falling back to default glob for caching."
-                  fi
-
-            - name: Set up Node.js ${{ inputs.node-version }}
-              uses: actions/setup-node@v4
-              with:
-                  node-version: ${{ inputs.node-version }}
-                  cache: "npm"
-                  cache-dependency-path: ${{ steps.paths.outputs.lock_file_for_cache }}
-                  registry-url: ${{ inputs.npm-repository }}
-
             - name: Install dependencies
-              working-directory: ${{ github.workspace }}
-              run: |
-                  if [ "${{ steps.paths.outputs.effective_project_root }}" == "${{ steps.paths.outputs.abs_input_working_dir }}" ]; then
-                    INSTALL_DIR="${{ steps.paths.outputs.abs_input_working_dir }}"
-                  else
-                    INSTALL_DIR="${{ steps.paths.outputs.effective_project_root }}"
-                  fi
-
-                  if [ -z "$INSTALL_DIR" ]; then
-                    echo "::error::Could not determine the directory for 'npm ci'."
-                    exit 1
-                  fi
-
-                  cd "$INSTALL_DIR" && npm ci --ignore-scripts
+              run: npm ci --ignore-scripts
 
             - name: Build package
               run: npm run build
