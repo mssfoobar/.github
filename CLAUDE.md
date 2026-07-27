@@ -22,7 +22,8 @@ AGIL Ops Hub is a comprehensive development platform for command and control sys
     ├── sonarqube-scan.yml
     ├── golang-sonarqube-scan.yml
     ├── claude.yml
-    └── claude-code-review.yml
+    ├── claude-code-review.yml
+    └── pr-claude-review.yml
 
 workflow-templates/      # Template workflows for new repositories
     ├── dev-build-service.yml
@@ -53,7 +54,8 @@ profile/
 
 **AI-Assisted Development Workflows**:
 - `claude.yml`: Allows mentioning @claude in PR comments, issues, and reviews to invoke Claude Code for assistance
-- `claude-code-review.yml`: Automatically reviews pull requests using Claude Code, providing feedback on code quality, security, and best practices
+- `claude-code-review.yml`: Reusable agentic PR review (find → verify → post one comment). Advisory only — never a required check, never a formal review
+- `pr-claude-review.yml`: This repo's own caller for `claude-code-review.yml`
 
 ### Image Tagging Strategy
 
@@ -138,11 +140,32 @@ Interactive Claude Code workflow that responds to @claude mentions in:
 Requires `CLAUDE_CODE_OAUTH_TOKEN` secret to be configured in repository settings.
 
 ### claude-code-review.yml
-Automated code review workflow that runs on every PR opened or synchronized. Claude Code reviews the changes and provides feedback on:
-- Code quality and best practices
-- Potential bugs or issues
-- Performance considerations
-- Security concerns
-- Test coverage
+**Reusable** (`on: workflow_call`) agentic PR review, consumed by other repos via
+`uses: mssfoobar/.github/.github/workflows/claude-code-review.yml@<ref>` with
+`secrets: inherit`. This repo consumes it through the thin `pr-claude-review.yml`
+caller.
 
-Reviews are posted as PR comments using the `gh pr comment` command. Can be filtered by PR author or file paths if needed.
+The prompt asks Claude to find issues and then **adversarially verify each one
+against the code before posting**, dropping anything it cannot confirm. That step
+is the point: a single-pass reviewer posts its false positives too, and each one
+costs a human the time to disprove it.
+
+Reviews are posted as a single PR comment via `gh pr comment`. Inputs: `runner`,
+`model`, `max_turns`, `timeout_minutes`, `review_instructions`.
+
+Two constraints that must not be quietly relaxed:
+- It posts a **comment**, never a formal review, and must never be a required
+  status check — so it can neither block a merge nor satisfy a required-approval
+  rule. Green CI stays the merge bar.
+- Callers should trigger on `opened` / `ready_for_review`, **not** `synchronize` —
+  a review per push produces near-duplicate comments for little added signal.
+
+Auth resolves `ANTHROPIC_API_KEY` → `CLAUDE_CODE_OAUTH_TOKEN` → skip with a
+warning. Anthropic blocks the OAuth path for **this** repo specifically, so
+self-review here stays skipped until `ANTHROPIC_API_KEY` is provisioned at the
+org level; consumer repos work today on the OAuth token.
+
+### pr-claude-review.yml
+This repo's own caller for `claude-code-review.yml`. Exists because converting
+that workflow to `workflow_call` removed its ability to trigger on this repo's
+own pull requests.

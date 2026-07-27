@@ -289,6 +289,49 @@ jobs:
     uses: mssfoobar/.github/.github/workflows/changeset-check.yml@main
 ```
 
+#### `claude-code-review.yml`
+
+Agentic PR review. Posts **one plain PR comment** per run.
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+concurrency:
+  group: pr-claude-review-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  review:
+    uses: mssfoobar/.github/.github/workflows/claude-code-review.yml@main
+    with:
+      runner: arc-runner        # omit for GitHub-hosted
+    secrets: inherit
+```
+
+`secrets: inherit` is required — the workflow needs either `ANTHROPIC_API_KEY`
+or `CLAUDE_CODE_OAUTH_TOKEN`, and without inheritance it sees neither and skips
+with a warning.
+
+Deliberate constraints, so this stays advice rather than a gate:
+
+- **Never make it a required status check**, and it never posts a formal
+  review — only a comment. It therefore cannot approve, request changes, or
+  satisfy a required-approval rule. Green CI stays the merge bar.
+- **Trigger on `opened` / `ready_for_review`, not `synchronize`.** A review per
+  push yields near-duplicate comments (one iams PR collected five) for very
+  little extra signal. Re-review on demand by mentioning `@claude`, which
+  `claude.yml` already handles.
+- Dependabot PRs and drafts are skipped automatically.
+
+Auth resolves in order: `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`,
+then skip-with-warning. Both paths exist because Anthropic blocks subscription
+(OAuth) access for **this** repo specifically, while OAuth works in consumer
+repos. Provisioning `ANTHROPIC_API_KEY` at the org level makes every repo
+behave uniformly and is the preferred end state.
+
+Inputs: `runner`, `model`, `max_turns`, `timeout_minutes`,
+`review_instructions` (extra repo-specific guidance appended to the prompt).
+
 #### `npm-snapshot-publish.yml`
 
 Publishes a snapshot version on every push to develop or `*/rc`. Mutates

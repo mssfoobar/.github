@@ -1,0 +1,26 @@
+name: PR review
+
+# This repo's own consumption of the reusable claude-code-review workflow.
+#
+# claude-code-review.yml used to be `on: pull_request` and reviewed this repo
+# directly. It is now `on: workflow_call` so every repo can share it, and this
+# thin caller keeps self-review working here.
+#
+# Note this repo is the one place the OAuth path does NOT work — Anthropic
+# blocks Claude subscription access for it. Until ANTHROPIC_API_KEY exists at
+# the org level, the reusable workflow will skip with a warning here (which is
+# exactly what it has been doing since 2026-06-29) while working normally in
+# consumer repos on the OAuth token.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+concurrency:
+  group: pr-claude-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    uses: ./.github/workflows/claude-code-review.yml
+    secrets: inherit
