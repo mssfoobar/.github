@@ -300,17 +300,32 @@ on:
 concurrency:
   group: pr-claude-review-${{ github.ref }}
   cancel-in-progress: true
+# Required. A called workflow can only NARROW its caller's permissions, never
+# widen them — so if you omit these (or set a narrower set, e.g. just
+# `contents: read`), the run fails at startup with "workflow file issue"
+# before any step executes.
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
 jobs:
   review:
     uses: mssfoobar/.github/.github/workflows/claude-code-review.yml@main
     with:
       runner: arc-runner        # omit for GitHub-hosted
-    secrets: inherit
+    # Pass exactly these two — NOT `secrets: inherit`, which would hand the
+    # reusable workflow every secret your repo holds (registry tokens, signing
+    # keys, cloud credentials) when it needs one. Both are optional; a repo
+    # that defines neither gets a clean skip-with-warning.
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
-`secrets: inherit` is required — the workflow needs either `ANTHROPIC_API_KEY`
-or `CLAUDE_CODE_OAUTH_TOKEN`, and without inheritance it sees neither and skips
-with a warning.
+Both gotchas above are real, not theoretical — the first shipped as a
+`startup_failure` and the second as a blocking Semgrep finding
+(`yaml.github-actions.security.secrets-inherit`) on the ops-hub PR that first
+consumed this workflow.
 
 Deliberate constraints, so this stays advice rather than a gate:
 

@@ -18,11 +18,17 @@ name: Claude Code Review
 #       uses: mssfoobar/.github/.github/workflows/claude-code-review.yml@<sha>
 #       with:
 #         runner: arc-runner        # omit for GitHub-hosted
-#       secrets: inherit
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 #
-# `secrets: inherit` matters — a reusable workflow cannot see the caller's
-# secrets otherwise, and both auth paths below are optional-by-design, so the
-# job would silently skip instead of failing loudly.
+# The caller MUST also declare `permissions: {contents: read, pull-requests:
+# write, id-token: write}`. A called workflow can only narrow its caller's
+# permissions, never widen them, so a narrower (or absent) caller block fails
+# the run at startup before any step executes.
+#
+# Pass the two secrets explicitly rather than `secrets: inherit` — inherit
+# hands a reusable workflow EVERY secret the calling repo holds.
 #
 # Trigger. The official examples use `[opened, synchronize]`; we suggest
 # `[opened, reopened, ready_for_review]` instead, for cost rather than
@@ -79,6 +85,17 @@ on:
         type: boolean
         default: true
         description: 'Whether to fall back to CLAUDE_CODE_OAUTH_TOKEN when ANTHROPIC_API_KEY is absent. Set false in repos where Anthropic blocks Claude subscription access (currently mssfoobar/.github itself) so they skip cleanly instead of failing red.'
+    # Declared explicitly so callers can pass exactly these two rather than
+    # `secrets: inherit`, which hands a reusable workflow EVERY secret in the
+    # repo — registry tokens, signing keys, cloud credentials — when it needs
+    # one. Both optional: the auth step below treats an absent secret as a
+    # valid (skip) state, and a caller passing a secret its repo doesn't define
+    # simply yields an empty string.
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
 
 jobs:
   claude-review:
@@ -137,7 +154,7 @@ jobs:
             echo "::warning::Claude Code Review skipped: only CLAUDE_CODE_OAUTH_TOKEN is available and this caller sets allow_oauth_fallback=false (Anthropic blocks Claude subscription access for it). Provision ANTHROPIC_API_KEY at the org level to enable reviews here."
             echo "method=skip" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::Claude Code Review skipped: neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN was visible. Provision one at the org level, and check the calling workflow passes 'secrets: inherit'."
+            echo "::warning::Claude Code Review skipped: neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN was visible. Provision one at the org level, and check the calling workflow passes them under its secrets: map."
             echo "method=skip" >> "$GITHUB_OUTPUT"
           fi
 
@@ -145,7 +162,7 @@ jobs:
         if: steps.auth.outputs.method != 'skip'
         # v6, per the official examples. v4 targets Node 20, which GitHub now
         # force-runs on Node 24 and warns about on every run.
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # depth 1, matching the official examples. The action checks out the
           # PR branch, and the review reads the diff through `gh pr diff` (an
@@ -157,7 +174,7 @@ jobs:
       - name: Run Claude Code Review
         if: steps.auth.outputs.method != 'skip'
         id: claude-review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
           anthropic_api_key: ${{ steps.auth.outputs.method == 'api_key' && secrets.ANTHROPIC_API_KEY || '' }}
           claude_code_oauth_token: ${{ steps.auth.outputs.method == 'oauth' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
