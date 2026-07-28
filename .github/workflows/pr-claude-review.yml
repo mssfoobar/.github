@@ -20,6 +20,13 @@ concurrency:
   group: pr-claude-review-${{ github.ref }}
   cancel-in-progress: true
 
+# A called workflow can only NARROW its caller's permissions, never widen them.
+# Omitting these (or declaring a narrower set) fails the run at startup.
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
 jobs:
   review:
     uses: ./.github/workflows/claude-code-review.yml
@@ -30,4 +37,8 @@ jobs:
       # today's clean skip into a broken check on every PR to this repo. Skip
       # cleanly until ANTHROPIC_API_KEY is provisioned org-wide.
       allow_oauth_fallback: false
-    secrets: inherit
+    # Pass exactly the two secrets the workflow declares, NOT `secrets:
+    # inherit` — that would hand it every secret this repo holds.
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

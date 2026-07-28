@@ -1,0 +1,24 @@
+# Keeps the SHA pins in the reusable workflows fresh.
+#
+# These workflows are consumed by every repo in the org, so a stale pin here
+# propagates everywhere — worse than a stale pin in a single repo. Pinning
+# without a bump mechanism just trades a supply-chain risk for a rot risk.
+#
+# Mirrors ops-hub's cooldown policy: wait out a minimum release age before
+# adopting a version update, so a compromised release has time to be detected
+# and yanked. Security updates are exempt and still open immediately.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore(deps)
