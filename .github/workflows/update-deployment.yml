@@ -68,7 +68,7 @@ jobs:
                   repositories: ${{ inputs.manifest_repo }}
 
             - name: Check out manifest repository
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
               with:
                   repository: ${{ inputs.org_name }}/${{ inputs.manifest_repo }}
                   ref: ${{ inputs.manifest_branch }}
