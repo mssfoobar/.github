@@ -289,6 +289,75 @@ jobs:
     uses: mssfoobar/.github/.github/workflows/changeset-check.yml@main
 ```
 
+#### `claude-code-review.yml`
+
+Agentic PR review. Posts **one plain PR comment** per run.
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+concurrency:
+  group: pr-claude-review-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  review:
+    uses: mssfoobar/.github/.github/workflows/claude-code-review.yml@main
+    with:
+      runner: arc-runner        # omit for GitHub-hosted
+    secrets: inherit
+```
+
+`secrets: inherit` is required — the workflow needs either `ANTHROPIC_API_KEY`
+or `CLAUDE_CODE_OAUTH_TOKEN`, and without inheritance it sees neither and skips
+with a warning.
+
+Deliberate constraints, so this stays advice rather than a gate:
+
+- **Never make it a required status check**, and it never posts a formal
+  review — only a comment. It therefore cannot approve, request changes, or
+  satisfy a required-approval rule. Green CI stays the merge bar.
+- **Trigger on `opened` / `ready_for_review` rather than `synchronize`.** This
+  is the one place we deviate from Anthropic's examples, and it is a cost
+  decision, not a correctness one: a review per push is a full agentic run, and
+  our runners are self-hosted. `use_sticky_comment: true` is set regardless, so
+  a caller that *does* opt into `synchronize` gets one comment updated in place
+  instead of the five near-duplicates one iams PR accumulated. Enabling it is
+  reasonable on GitHub-hosted runners.
+- Dependabot PRs and drafts are skipped. Note the action's own `allowed_bots`
+  input already defaults to "no bots", so the `if:` is a **cost** control, not
+  the security control — without it the job still allocates a runner and checks
+  out the repo before declining.
+
+Otherwise this follows the upstream
+[`pr-review-comprehensive`](https://github.com/anthropics/claude-code-action/blob/main/examples/pr-review-comprehensive.yml)
+example: same `permissions` triple, `actions/checkout@v6` at `fetch-depth: 1`,
+and the `REPO:` / `PR NUMBER:` prompt header its examples all use.
+
+Auth resolves in order: `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`,
+then skip-with-warning. Both paths exist because Anthropic blocks subscription
+(OAuth) access for **this** repo specifically, while OAuth works in consumer
+repos. Provisioning `ANTHROPIC_API_KEY` at the org level makes every repo
+behave uniformly and is the preferred end state.
+
+Set `allow_oauth_fallback: false` in a repo where OAuth is blocked, so it skips
+cleanly instead of failing red on a token it isn't allowed to use. This repo's
+own caller does exactly that.
+
+**The action refuses to run when the workflow file differs from the copy on the
+default branch** — its own guard against a PR editing the workflow to exfiltrate
+secrets. Two consequences, both expected:
+
+- The PR that first adds (or later edits) the review workflow will not be
+  reviewed by it. The annotation says as much: *"If you're seeing this on a PR
+  when you first add a code review workflow file to your repository, this is
+  normal and you should ignore this error."*
+- Reviews only start on PRs opened **after** the workflow lands on the default
+  branch.
+
+Inputs: `runner`, `model`, `max_turns`, `timeout_minutes`,
+`review_instructions`, `allow_oauth_fallback`.
+
 #### `npm-snapshot-publish.yml`
 
 Publishes a snapshot version on every push to develop or `*/rc`. Mutates
