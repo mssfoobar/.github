@@ -24,10 +24,14 @@ name: Claude Code Review
 # secrets otherwise, and both auth paths below are optional-by-design, so the
 # job would silently skip instead of failing loudly.
 #
-# Trigger on `opened` / `ready_for_review`, NOT `synchronize`: a review per
-# push produces near-duplicate comments (one iams PR collected five) for very
-# little added signal. Re-review on demand with an `@claude` mention, which
-# claude.yml already handles.
+# Trigger. The official examples use `[opened, synchronize]`; we suggest
+# `[opened, reopened, ready_for_review]` instead, for cost rather than
+# correctness — a review per push is a full agentic run each time, which is
+# expensive on a self-hosted scale set. `use_sticky_comment` below means a
+# caller that DOES opt into `synchronize` gets one updating comment rather than
+# the five near-duplicates one iams PR accumulated, so enabling it is a
+# reasonable choice on GitHub-hosted runners. Either way, re-review on demand
+# with an `@claude` mention, which claude.yml already handles.
 #
 # Security posture. No attacker-controlled text (PR title/body/branch name,
 # comment bodies) is interpolated into `run:` or into the action args — the
@@ -53,7 +57,7 @@ on:
       model:
         required: false
         type: string
-        default: 'claude-sonnet-4-6'
+        default: 'claude-sonnet-5'
         description: 'Model to review with. Pinned rather than floating so behaviour does not shift under a minor action bump.'
       max_turns:
         required: false
@@ -79,22 +83,30 @@ on:
 jobs:
   claude-review:
     name: Claude review
-    # Skip bots and drafts. Dependabot runs get a restricted token that cannot
-    # read org secrets, so the review would skip anyway — but it would still
-    # occupy a runner slot and emit a red-herring warning. Its PRs are SHA
-    # bumps, where the check that actually matters ("does the pinned SHA match
-    # the claimed tag") is a script, not a language model.
+    # Skip bots and drafts.
+    #
+    # The action's own `allowed_bots` input already defaults to empty, meaning
+    # NO bot can trigger it — so this condition is not the security control,
+    # it's a cost control. Without it the job still spins up a runner, checks
+    # out the repo, and only then declines. That matters on a self-hosted scale
+    # set. (Dependabot runs also get a restricted token that cannot read org
+    # secrets, so the auth step would skip anyway.)
+    #
+    # Reviewing a Dependabot PR is low value regardless: the check that matters
+    # on a SHA bump is whether the pin matches the claimed tag, which is a
+    # script, not a language model.
     if: >-
       github.actor != 'dependabot[bot]' &&
       github.event.pull_request.draft == false
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    # Matches the official examples in anthropics/claude-code-action.
+    # `pull-requests: write` already covers posting a PR comment — no
+    # `issues: write` needed, despite `gh pr comment` hitting the issues
+    # endpoint. `id-token: write` is for OIDC.
     permissions:
       contents: read
-      # write, not read: the review is posted with `gh pr comment`, which
-      # creates an issue comment on the PR.
       pull-requests: write
-      issues: write
       id-token: write
 
     steps:
@@ -131,11 +143,16 @@ jobs:
 
       - name: Checkout repository
         if: steps.auth.outputs.method != 'skip'
-        uses: actions/checkout@v4
+        # v6, per the official examples. v4 targets Node 20, which GitHub now
+        # force-runs on Node 24 and warns about on every run.
+        uses: actions/checkout@v6
         with:
-          # Full history: the review compares against the merge base, and a
-          # depth-1 clone has no merge base to compare against.
-          fetch-depth: 0
+          # depth 1, matching the official examples. The action checks out the
+          # PR branch, and the review reads the diff through `gh pr diff` (an
+          # API call) plus the working tree — neither needs local history. A
+          # full clone would be a real cost on a large monorepo, especially on
+          # self-hosted runners.
+          fetch-depth: 1
 
       - name: Run Claude Code Review
         if: steps.auth.outputs.method != 'skip'
@@ -144,17 +161,26 @@ jobs:
         with:
           anthropic_api_key: ${{ steps.auth.outputs.method == 'api_key' && secrets.ANTHROPIC_API_KEY || '' }}
           claude_code_oauth_token: ${{ steps.auth.outputs.method == 'oauth' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          # Collapse to a single comment that is UPDATED in place rather than a
+          # new one per run. Belt-and-braces with the `opened`/`ready_for_review`
+          # trigger: a caller that does opt into `synchronize` still ends up with
+          # one comment instead of one per push.
+          use_sticky_comment: true
           prompt: |
-            Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request.
 
             Start by reading the repo's AGENTS.md and/or CLAUDE.md. Violations of
             the conventions documented there are valid findings; your own
             stylistic preferences are not.
 
-            Get the diff with `gh pr diff`, then read the surrounding files in the
-            checkout for context — never review from diff hunks alone. The merge
-            base is available locally, so `git show <base-sha>:<path>` works for
-            before/after comparisons.
+            The PR branch is already checked out in the current working directory,
+            as a shallow clone. Get the diff with `gh pr diff` and read the
+            surrounding files in the working tree for context — never review from
+            diff hunks alone. There is no local history, so use `gh` rather than
+            `git log`/`git show` to look at anything outside the checkout.
 
             ## What to look for
 
@@ -205,7 +231,10 @@ jobs:
             ${{ inputs.review_instructions }}
 
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # `--allowedTools` camelCase per the official docs (the CLI accepts
+          # `--allowed-tools` too, but match upstream so this greps cleanly
+          # against their examples).
           claude_args: >-
             --max-turns ${{ inputs.max_turns }}
             --model ${{ inputs.model }}
-            --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git merge-base:*),Bash(ls:*),Read,Grep,Glob"
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(ls:*),Read,Grep,Glob"
