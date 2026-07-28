@@ -23,4 +23,11 @@ concurrency:
 jobs:
   review:
     uses: ./.github/workflows/claude-code-review.yml
+    with:
+      # Do NOT fall back to the OAuth token here. It exists at the org level, so
+      # the fallback would happily select it — and then the action fails red with
+      # "your organization has disabled Claude subscription access", turning
+      # today's clean skip into a broken check on every PR to this repo. Skip
+      # cleanly until ANTHROPIC_API_KEY is provisioned org-wide.
+      allow_oauth_fallback: false
     secrets: inherit

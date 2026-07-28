@@ -329,8 +329,23 @@ then skip-with-warning. Both paths exist because Anthropic blocks subscription
 repos. Provisioning `ANTHROPIC_API_KEY` at the org level makes every repo
 behave uniformly and is the preferred end state.
 
+Set `allow_oauth_fallback: false` in a repo where OAuth is blocked, so it skips
+cleanly instead of failing red on a token it isn't allowed to use. This repo's
+own caller does exactly that.
+
+**The action refuses to run when the workflow file differs from the copy on the
+default branch** — its own guard against a PR editing the workflow to exfiltrate
+secrets. Two consequences, both expected:
+
+- The PR that first adds (or later edits) the review workflow will not be
+  reviewed by it. The annotation says as much: *"If you're seeing this on a PR
+  when you first add a code review workflow file to your repository, this is
+  normal and you should ignore this error."*
+- Reviews only start on PRs opened **after** the workflow lands on the default
+  branch.
+
 Inputs: `runner`, `model`, `max_turns`, `timeout_minutes`,
-`review_instructions` (extra repo-specific guidance appended to the prompt).
+`review_instructions`, `allow_oauth_fallback`.
 
 #### `npm-snapshot-publish.yml`
 
