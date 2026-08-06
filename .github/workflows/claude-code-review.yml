@@ -18,9 +18,16 @@ name: Claude Code Review
 #       uses: mssfoobar/.github/.github/workflows/claude-code-review.yml@<sha>
 #       with:
 #         runner: arc-runner        # omit for GitHub-hosted
+#         allowed_bots: 'my-app[bot]'   # omit to skip bot-authored PRs
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#
+# Bot-authored PRs. By default every non-human actor is skipped. A repo where
+# an app opens real PRs — a release sync-back, an agent committing changes —
+# opts those actors in with `allowed_bots`. Without it the job does not merely
+# decline: the underlying action fails the run, so the check sits permanently
+# red on PRs nobody can make green. Dependabot is excluded either way.
 #
 # The caller MUST also declare `permissions: {contents: read, pull-requests:
 # write, id-token: write}`. A called workflow can only narrow its caller's
@@ -85,6 +92,11 @@ on:
         type: boolean
         default: true
         description: 'Whether to fall back to CLAUDE_CODE_OAUTH_TOKEN when ANTHROPIC_API_KEY is absent. Set false in repos where Anthropic blocks Claude subscription access (currently mssfoobar/.github itself) so they skip cleanly instead of failing red.'
+      allowed_bots:
+        required: false
+        type: string
+        default: ''
+        description: 'Comma-separated bot actors whose PRs may be reviewed (e.g. "jensen-junior[bot]"), or "*" for all. The action refuses non-human actors by default and FAILS RED rather than skipping, so a repo whose PRs are opened by an app (release sync-back, agent-authored changes) sees a permanently-failing check until it opts those actors in here. Grant only the bots you actually trust to author a diff: the review reads the PR body and diff, so a bot on this list is a prompt-injection surface — bounded by `contents: read` and a plain comment, but real.'
     # Declared explicitly so callers can pass exactly these two rather than
     # `secrets: inherit`, which hands a reusable workflow EVERY secret in the
     # repo — registry tokens, signing keys, cloud credentials — when it needs
@@ -100,21 +112,29 @@ on:
 jobs:
   claude-review:
     name: Claude review
-    # Skip bots and drafts.
+    # Skip drafts, dependabot, and — unless the caller opted in — every other bot.
     #
-    # The action's own `allowed_bots` input already defaults to empty, meaning
-    # NO bot can trigger it — so this condition is not the security control,
-    # it's a cost control. Without it the job still spins up a runner, checks
-    # out the repo, and only then declines. That matters on a self-hosted scale
-    # set. (Dependabot runs also get a restricted token that cannot read org
-    # secrets, so the auth step would skip anyway.)
+    # The bot half is not a security control; the action's own `allowed_bots`
+    # enforces that, and we forward `inputs.allowed_bots` to it below. This
+    # condition exists so the default is a clean SKIP rather than a red X.
+    # `allowed_bots` defaults to empty, meaning the action refuses any non-human
+    # actor — but it refuses by FAILING ("Workflow initiated by non-human actor
+    # … Add bot to allowed_bots list"), after spinning up a runner and checking
+    # out the repo. In a repo whose PRs are routinely opened by an app (a
+    # release sync-back, an agent-authored change) that is a permanently-failing
+    # check plus wasted self-hosted runner time on every one. Gating the job on
+    # `allowed_bots` being set keeps the out-of-the-box behaviour identical in
+    # intent — bots are not reviewed — while reporting it honestly.
     #
-    # Reviewing a Dependabot PR is low value regardless: the check that matters
-    # on a SHA bump is whether the pin matches the claimed tag, which is a
-    # script, not a language model.
+    # Dependabot stays excluded unconditionally, even when a caller sets
+    # `allowed_bots: '*'`: its runs get a restricted token that cannot read org
+    # secrets (so the auth step would skip anyway), and reviewing a SHA bump is
+    # low value — the check that matters is whether the pin matches the claimed
+    # tag, which is a script, not a language model.
     if: >-
       github.actor != 'dependabot[bot]' &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      (inputs.allowed_bots != '' || !endsWith(github.actor, '[bot]'))
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     # Matches the official examples in anthropics/claude-code-action.
@@ -183,6 +203,10 @@ jobs:
           # trigger: a caller that does opt into `synchronize` still ends up with
           # one comment instead of one per push.
           use_sticky_comment: true
+          # Empty (the default) means the action refuses every non-human actor.
+          # The job-level `if` above already skips in that case, so this only
+          # takes effect for a caller that deliberately opted bots in.
+          allowed_bots: ${{ inputs.allowed_bots }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
