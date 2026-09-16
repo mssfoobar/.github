@@ -84,12 +84,35 @@ jobs:
           if [ -n "$PUBLISHABLE_PATHS" ]; then
             pattern=$(printf '%s' "$PUBLISHABLE_PATHS" | grep -v '^[[:space:]]*$' | paste -sd '|' -)
             if [ -n "$pattern" ]; then
-              changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep -v '^\.changeset/' || true)
+              # Reject a malformed pattern BEFORE trusting it. grep exits 2 on a
+              # bad regex, and `! grep` turns that into "no match" — so a single
+              # typo in the caller's list would silently exempt every PR in the
+              # repo, green and unnoticed. Probe against empty input: a usable
+              # pattern exits 1 (no match), a broken one exits 2+.
+              printf '' | grep -qE "$pattern" 2>/dev/null || probe=$?
+              if [ "${probe:-1}" -gt 1 ]; then
+                echo "::error::publishable-paths is not a valid extended regex (grep exit ${probe}). Refusing to run, because a bad pattern would silently exempt every PR. Pattern: ${pattern}"
+                exit 1
+              fi
+
+              # --no-renames so a rename shows BOTH paths. With git's default
+              # rename detection a move out of a publishable path reports only
+              # the destination, so relocating a published source file to e.g.
+              # docs/ would look like it touched nothing publishable.
+              changed=$(git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" | grep -v '^\.changeset/' || true)
               if [ -z "$changed" ]; then
                 echo "PR touches nothing outside .changeset/ — no publishable path affected; exempt."
                 exit 0
               fi
-              if ! printf '%s\n' "$changed" | grep -qE "$pattern"; then
+
+              # Branch on the exit code rather than negating it, so a grep
+              # failure can never be read as "no publishable path".
+              printf '%s\n' "$changed" | grep -qE "$pattern" || rc=$?
+              if [ "${rc:-0}" -gt 1 ]; then
+                echo "::error::Failed to match paths against publishable-paths (grep exit ${rc}). Refusing to exempt this PR."
+                exit 1
+              fi
+              if [ "${rc:-0}" -eq 1 ]; then
                 echo "No publishable path touched by this PR — exempt from the changeset requirement."
                 echo "Paths changed:"
                 printf '%s\n' "$changed" | sed 's/^/  /'
