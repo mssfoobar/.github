@@ -61,13 +61,44 @@ jobs:
           RELEASE_HEAD_REF: ${{ inputs.release-head-ref }}
           PUBLISHABLE_PATHS: ${{ inputs.publishable-paths }}
         run: |
-          # Release sync-back PRs (e.g. main -> develop) only delete the
-          # consumed changesets and carry none, so they are exempt when the
-          # caller opts in via the release-head-ref input. Exit 0 (success)
-          # rather than skipping the job, so the required check is satisfied.
-          if [ -n "$RELEASE_HEAD_REF" ] && [ "$HEAD_REF" = "$RELEASE_HEAD_REF" ]; then
-            echo "Release sync-back PR (head '$HEAD_REF') — exempt from the changeset requirement."
-            exit 0
+          # Release sync-back PRs (e.g. main -> develop) carry no changeset by
+          # construction: the release already consumed them, so the sync's
+          # `.changeset/` changes are all deletions. Exempt when the caller opts
+          # in via release-head-ref. Exit 0 (success) rather than skipping the
+          # job, so the required check is satisfied.
+          if [ -n "$RELEASE_HEAD_REF" ]; then
+            # (a) The auto-PR opened by the publish workflow: head IS the release
+            # branch. Cheap, no network.
+            if [ "$HEAD_REF" = "$RELEASE_HEAD_REF" ]; then
+              echo "Release sync-back PR (head '$HEAD_REF') — exempt from the changeset requirement."
+              exit 0
+            fi
+
+            # (b) The same sync under any other branch name. When the auto-PR
+            # conflicts a maintainer re-does it from a branch —
+            # chore/sync-gis-release-20260914, chore/sync-release-sds-200 — where
+            # (a) never fires, so each one needed a hand-written empty changeset to
+            # pass this gate. That workaround trains the reflex of silencing the
+            # gate, and it did: 21 of the 410 inert changesets pruned from ops-hub
+            # were sync artifacts, and that haystack hid a real release defect for
+            # six weeks (AOH-8674, AOH-9125).
+            #
+            # So identify a sync by CONTENT, not by name: a PR introducing nothing
+            # that is not already on the release branch cannot need a changeset,
+            # because everything in it has already shipped. A branch name is a
+            # convention nobody enforces; this is a property of the commits.
+            #
+            # Measured over 13 ops-hub PRs: exempts all 6 real syncs, including two
+            # whose titles never say "sync" and which any name-based rule misses,
+            # and gates all 7 feature PRs.
+            #
+            # Fails CLOSED: a failed fetch or missing ref makes git diff non-zero,
+            # so the requirement simply applies.
+            if git fetch --quiet --depth=1 origin "$RELEASE_HEAD_REF" 2>/dev/null &&
+              git diff --quiet FETCH_HEAD..."$HEAD_SHA" 2>/dev/null; then
+              echo "PR introduces nothing not already on '$RELEASE_HEAD_REF' — a release sync by content; exempt from the changeset requirement."
+              exit 0
+            fi
           fi
           # A changeset's only job is to move a published package's version, so
           # a PR that cannot affect any published artifact has nothing to
