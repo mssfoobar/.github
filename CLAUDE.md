@@ -141,24 +141,31 @@ Requires `CLAUDE_CODE_OAUTH_TOKEN` secret to be configured in repository setting
 
 ### claude-code-review.yml
 **Reusable** (`on: workflow_call`) agentic PR review, consumed by other repos via
-`uses: mssfoobar/.github/.github/workflows/claude-code-review.yml@<ref>` with
-`secrets: inherit`. This repo consumes it through the thin `pr-claude-review.yml`
-caller.
+`uses: mssfoobar/.github/.github/workflows/claude-code-review.yml@<ref>`, passing
+exactly `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` under `secrets:` — never
+`secrets: inherit`, which hands it every secret the caller holds. This repo
+consumes it through the thin `pr-claude-review.yml` caller.
 
 The prompt asks Claude to find issues and then **adversarially verify each one
 against the code before posting**, dropping anything it cannot confirm. That step
 is the point: a single-pass reviewer posts its false positives too, and each one
 costs a human the time to disprove it.
 
-Reviews are posted as a single PR comment via `gh pr comment`. Inputs: `runner`,
-`model`, `max_turns`, `timeout_minutes`, `review_instructions`.
+Reviews are posted as a single PR comment via `gh pr comment`. A failed or
+timed-out review is reported by the `report-failure` job with the marker
+`<!-- claude-code-review:failed -->` (a stable contract callers may count).
+Inputs: `runner`, `model`, `max_turns` (80), `timeout_minutes` (40),
+`review_instructions`, `allow_oauth_fallback`, `allowed_bots`, `report_failure`.
 
 Two constraints that must not be quietly relaxed:
 - It posts a **comment**, never a formal review, and must never be a required
   status check — so it can neither block a merge nor satisfy a required-approval
   rule. Green CI stays the merge bar.
-- Callers should trigger on `opened` / `ready_for_review`, **not** `synchronize` —
-  a review per push produces near-duplicate comments for little added signal.
+- Callers should trigger on `opened` / `ready_for_review`, **not** plain
+  `synchronize` — every run posts a NEW comment (`use_sticky_comment` is inert
+  in agent mode), so a review per push produces near-duplicates. A
+  `synchronize` gated to "review only if no review exists yet" is fine, and is
+  how a caller covers a PR opened in conflict (which fires no `opened`).
 
 Auth resolves `ANTHROPIC_API_KEY` → `CLAUDE_CODE_OAUTH_TOKEN` → skip with a
 warning. Anthropic blocks the OAuth path for **this** repo specifically, so

@@ -310,8 +310,14 @@ jobs:
   # bot, dependabot) is never reported, and neither is a clean auth skip, which
   # ends green.
   #
-  # Accepted cost: a job that waited 24h for a runner also ends `cancelled`, so
-  # a runner outage is reported as a failed review.
+  # Not reported, because they end GREEN: a PR that edits this workflow (the
+  # action's validation skip), and a model that finishes without calling
+  # `gh pr comment`. Both mean no review and no report.
+  #
+  # Accepted costs: a job that waited 24h for a runner also ends `cancelled`,
+  # so a runner outage is reported too (the wording says "cancelled", not
+  # "failed"); and this job runs on the same runner, so in an outage it can
+  # expire unposted as well.
   #
   # The body avoids the `@claude` trigger word as a precaution; a comment
   # posted with GITHUB_TOKEN starts no workflow run anyway.
@@ -333,8 +339,14 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULT: ${{ needs.claude-review.result }}
         run: |
+          if [ "$RESULT" = "cancelled" ]; then
+            what="was cancelled — it timed out, or no runner picked it up in time"
+          else
+            what="failed"
+          fi
           gh pr comment "$PR" --repo "$REPO" --body "<!-- claude-code-review:failed -->
-          The automated Claude review run [failed or timed out]($RUN_URL). If no review appears above, the run log says why — on a large PR it is usually the turn cap.
+          The automated Claude review run [$what]($RUN_URL). If no review appears above, the run log says why.
 
-          Close and reopen the PR to try again."
+          A transient cause (the turn cap on a large PR, a timeout, a runner outage) may pass on a retry: close and reopen the PR. A configuration cause (an actor not in \`allowed_bots\`, blocked OAuth) fails the same way every time until the caller is fixed."

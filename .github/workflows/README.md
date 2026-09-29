@@ -385,7 +385,14 @@ caller can count it to cap retries. It fires when the review job fails **or is
 cancelled inside a live run**, because a job past `timeout-minutes` concludes
 `cancelled`, never `failure`. Runs cancelled as a whole (superseded by a
 caller's concurrency group, or cancelled by hand) are not reported. Set
-`report_failure: false` if the caller reports failures itself.
+`report_failure: false` if the caller reports failures itself — **ops-hub's
+caller does, with the same marker**, so bumping its pin without that input
+posts two markers per failure and halves its retry budget.
+
+Two outcomes end green and are therefore **not** reported: a PR that edits the
+review workflow (the validation skip above), and a model that finishes without
+calling `gh pr comment`. Both leave no review and no report. The report job
+runs on the same `runner`, so during a runner outage it can expire unposted too.
 
 Inputs: `runner`, `model`, `max_turns` (default 80), `timeout_minutes`
 (default 40), `review_instructions`, `allow_oauth_fallback`, `allowed_bots`,
