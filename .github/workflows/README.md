@@ -335,10 +335,16 @@ Deliberate constraints, so this stays advice rather than a gate:
 - **Trigger on `opened` / `ready_for_review` rather than `synchronize`.** This
   is the one place we deviate from Anthropic's examples, and it is a cost
   decision, not a correctness one: a review per push is a full agentic run, and
-  our runners are self-hosted. `use_sticky_comment: true` is set regardless, so
-  a caller that *does* opt into `synchronize` gets one comment updated in place
-  instead of the five near-duplicates one iams PR accumulated. Enabling it is
-  reasonable on GitHub-hosted runners.
+  our runners are self-hosted. **Plain `synchronize` also means a new comment
+  per push.** `use_sticky_comment: true` is set but inert: this workflow passes
+  a `prompt`, which runs the action in agent mode, and agent mode creates no
+  tracking comment to update — the model posts each review with
+  `gh pr comment`. That is how one iams PR collected five near-duplicates.
+- **The suggested trigger misses one case: a PR opened while it conflicts with
+  its base.** GitHub fires no `pull_request` workflows for it, so it never sees
+  `opened`. A caller that adds `synchronize` behind a "review only if no review
+  exists yet" gate closes that gap without a review per push — ops-hub's caller
+  does this.
 - Dependabot PRs and drafts are skipped. Note the action's own `allowed_bots`
   input already defaults to "no bots", so the `if:` is a **cost** control, not
   the security control — without it the job still allocates a runner and checks
@@ -370,8 +376,20 @@ secrets. Two consequences, both expected:
 - Reviews only start on PRs opened **after** the workflow lands on the default
   branch.
 
-Inputs: `runner`, `model`, `max_turns`, `timeout_minutes`,
-`review_instructions`, `allow_oauth_fallback`.
+**A failed review is reported on the PR.** The review comment is the agent's
+last act, so a run that fails — most often at the turn cap on a large PR —
+used to leave only a red check. The `report-failure` job now posts a short
+comment with the run link, starting with the marker
+`<!-- claude-code-review:failed -->`. The marker is a stable contract: a
+caller can count it to cap retries. It fires when the review job fails **or is
+cancelled inside a live run**, because a job past `timeout-minutes` concludes
+`cancelled`, never `failure`. Runs cancelled as a whole (superseded by a
+caller's concurrency group, or cancelled by hand) are not reported. Set
+`report_failure: false` if the caller reports failures itself.
+
+Inputs: `runner`, `model`, `max_turns` (default 80), `timeout_minutes`
+(default 40), `review_instructions`, `allow_oauth_fallback`, `allowed_bots`,
+`report_failure` (default `true`).
 
 #### `npm-snapshot-publish.yml`
 
