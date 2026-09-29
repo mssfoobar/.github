@@ -40,11 +40,24 @@ name: Claude Code Review
 # Trigger. The official examples use `[opened, synchronize]`; we suggest
 # `[opened, reopened, ready_for_review]` instead, for cost rather than
 # correctness — a review per push is a full agentic run each time, which is
-# expensive on a self-hosted scale set. `use_sticky_comment` below means a
-# caller that DOES opt into `synchronize` gets one updating comment rather than
-# the five near-duplicates one iams PR accumulated, so enabling it is a
-# reasonable choice on GitHub-hosted runners. Either way, re-review on demand
-# with an `@claude` mention, which claude.yml already handles.
+# expensive on a self-hosted scale set. Do NOT rely on `use_sticky_comment` to
+# make `synchronize` cheap in comments either: this workflow passes a `prompt`,
+# which puts the action in agent mode, and agent mode creates no tracking
+# comment ("No tracking comment in agent mode", src/modes/agent/index.ts at the
+# pinned SHA). The review is posted by the model via `gh pr comment`, so every
+# run is a NEW comment — how one iams PR collected five. A caller that wants
+# reviews on push should gate them itself (review only if no review exists
+# yet). Re-review on demand with an `@claude` mention, which claude.yml handles.
+#
+# A PR opened while it conflicts with its base fires NO `pull_request`
+# workflows at all, so with the suggested trigger it is never reviewed. The
+# same "review only if none exists" gate on `synchronize` closes that gap.
+#
+# Failed runs. A review that fails — most often at the turn cap on a large PR —
+# posts nothing, since the comment is the agent's last act. `report-failure`
+# below says so on the PR instead of leaving only a red check. Its comment
+# starts with the marker `<!-- claude-code-review:failed -->`, which a caller
+# can count to cap retries; treat the marker as a stable contract.
 #
 # Security posture. No attacker-controlled text (PR title/body/branch name,
 # comment bodies) is interpolated into `run:` or into the action args — the
@@ -75,13 +88,13 @@ on:
       max_turns:
         required: false
         type: number
-        default: 40
-        description: 'Upper bound on the agentic loop, to cap a stuck session. The find-then-verify prompt needs more turns than a single-pass review.'
+        default: 80
+        description: 'Upper bound on the agentic loop, to cap a stuck session. The find-then-verify prompt needs more turns than a single-pass review. 80 because 40 was the most common reason reviews went missing: measured on a monorepo caller, successful runs used p50 21 / p90 36 / max 49 turns, and about one run in eight died at 40 with nothing posted.'
       timeout_minutes:
         required: false
         type: number
-        default: 20
-        description: 'Job timeout in minutes.'
+        default: 40
+        description: 'Job timeout in minutes. Raised with max_turns: the longest successful run measured took ~15 minutes at under 50 turns. A job that times out concludes `cancelled`, not `failure`.'
       review_instructions:
         required: false
         type: string
@@ -97,6 +110,11 @@ on:
         type: string
         default: ''
         description: 'Comma-separated bot actors whose PRs may be reviewed (e.g. "jensen-junior[bot]"), or "*" for all. The action refuses non-human actors by default and FAILS RED rather than skipping, so a repo whose PRs are opened by an app (release sync-back, agent-authored changes) sees a permanently-failing check until it opts those actors in here. Grant only the bots you actually trust to author a diff: the review reads the PR body and diff, so a bot on this list is a prompt-injection surface — bounded by `contents: read` and a plain comment, but real.'
+      report_failure:
+        required: false
+        type: boolean
+        default: true
+        description: 'Post a PR comment (marker `<!-- claude-code-review:failed -->`) when the review fails or times out, instead of leaving only a red check. Set false if the caller reports failures itself.'
     # Declared explicitly so callers can pass exactly these two rather than
     # `secrets: inherit`, which hands a reusable workflow EVERY secret in the
     # repo — registry tokens, signing keys, cloud credentials — when it needs
@@ -198,10 +216,10 @@ jobs:
         with:
           anthropic_api_key: ${{ steps.auth.outputs.method == 'api_key' && secrets.ANTHROPIC_API_KEY || '' }}
           claude_code_oauth_token: ${{ steps.auth.outputs.method == 'oauth' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
-          # Collapse to a single comment that is UPDATED in place rather than a
-          # new one per run. Belt-and-braces with the `opened`/`ready_for_review`
-          # trigger: a caller that does opt into `synchronize` still ends up with
-          # one comment instead of one per push.
+          # INERT here, kept in case upstream changes: sticky comments apply to
+          # the action's tracking comment, and agent mode (a `prompt` is set)
+          # creates none. The review is a fresh `gh pr comment` every run. See
+          # "Trigger" in the header.
           use_sticky_comment: true
           # Empty (the default) means the action refuses every non-human actor.
           # The job-level `if` above already skips in that case, so this only
@@ -279,3 +297,56 @@ jobs:
             --max-turns ${{ inputs.max_turns }}
             --model ${{ inputs.model }}
             --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(ls:*),Read,Grep,Glob"
+
+  # A failed review used to leave nothing on the PR but a red check nobody
+  # reads. Say so on the PR.
+  #
+  # Counts a review job that FAILED, or was CANCELLED inside a live run — a job
+  # past `timeout-minutes` concludes `cancelled`, never `failure` (proven on a
+  # throwaway run: `needs.<id>.result == 'cancelled'`, with `!cancelled()` still
+  # true downstream). `!cancelled()` excludes a run cancelled as a whole: a
+  # caller's concurrency superseding it, a queued run being replaced, or a
+  # manual cancel — none of which is a failed review. A skipped review (draft,
+  # bot, dependabot) is never reported, and neither is a clean auth skip, which
+  # ends green.
+  #
+  # Not reported, because they end GREEN: a PR that edits this workflow (the
+  # action's validation skip), and a model that finishes without calling
+  # `gh pr comment`. Both mean no review and no report.
+  #
+  # Accepted costs: a job that waited 24h for a runner also ends `cancelled`,
+  # so a runner outage is reported too (the wording says "cancelled", not
+  # "failed"); and this job runs on the same runner, so in an outage it can
+  # expire unposted as well.
+  #
+  # The body avoids the `@claude` trigger word as a precaution; a comment
+  # posted with GITHUB_TOKEN starts no workflow run anyway.
+  report-failure:
+    name: Report failed review
+    needs: claude-review
+    if: >-
+      inputs.report_failure && !cancelled() &&
+      (needs.claude-review.result == 'failure' || needs.claude-review.result == 'cancelled')
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Comment on the PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULT: ${{ needs.claude-review.result }}
+        run: |
+          if [ "$RESULT" = "cancelled" ]; then
+            what="was cancelled — it timed out, or no runner picked it up in time"
+          else
+            what="failed"
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body "<!-- claude-code-review:failed -->
+          The automated Claude review run [$what]($RUN_URL). If no review appears above, the run log says why.
+
+          A transient cause (the turn cap on a large PR, a timeout, a runner outage) may pass on a retry: close and reopen the PR. A configuration cause (an actor not in \`allowed_bots\`, blocked OAuth) fails the same way every time until the caller is fixed."
