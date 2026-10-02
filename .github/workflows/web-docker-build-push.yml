@@ -40,7 +40,7 @@ jobs:
             image_tag: ${{ steps.build_and_upload.outputs.image_tag }}
         steps:
             - name: "☁️ Checkout code"
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
               with:
                   path: ./src
 
