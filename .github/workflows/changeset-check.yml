@@ -1,7 +1,8 @@
 name: Changeset Check
 
 # Reusable required-status check that enforces every PR carries a
-# changeset (or marker-less changeset for no-bump changes). Skips:
+# changeset: a real one when it moves a package's version, or an empty one
+# (`changeset add --empty`) as a receipt when it ships nothing. Skips:
 #   * the changesets/action's own version PR (head ref starts with
 #     `changeset-release/`) — that PR by design contains zero pending
 #     changesets because it has just consumed them.
@@ -123,6 +124,6 @@ jobs:
           if git diff --name-only --diff-filter=AM "$BASE_SHA...$HEAD_SHA" | grep -E '^\.changeset/[^/]+\.md$' | grep -v '^\.changeset/README\.md$' >/dev/null; then
             echo "Changeset found."
           else
-            echo "::error::No changeset in this PR. Run \`npx changeset\` to add one, or add a marker-less changeset (empty frontmatter) for docs/CI/comment-only changes."
+            echo "::error::No changeset in this PR. If it changes what a package ships, run \`npx changeset\` and pick the bump. If it ships nothing, run \`npx changeset add --empty\` and leave the body blank or write one line saying why nothing ships — never restate the PR title (AOH-9137)."
             exit 1
           fi

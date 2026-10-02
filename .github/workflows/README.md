@@ -276,9 +276,12 @@ jobs:
 
 #### `changeset-check.yml`
 
-Required check that enforces every PR carries a `.changeset/*.md` file (or
-marker-less changeset for no-bump changes). Skips dependabot PRs and the
-`changeset-release/*` branch automatically.
+Required check that enforces every PR carries a `.changeset/*.md` file. A PR
+that ships nothing adds an empty one (`npx changeset add --empty`) as a receipt
+that the release decision was made: blank, or one line saying why nothing
+ships, never a restatement of the PR. Skips dependabot PRs and the
+`changeset-release/*` branch automatically, and, with the opt-in
+`publishable-paths` input, any PR that touches no publishable path.
 
 ```yaml
 on:
