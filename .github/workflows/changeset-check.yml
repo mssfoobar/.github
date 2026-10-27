@@ -8,6 +8,11 @@ name: Changeset Check
 #     changesets because it has just consumed them.
 #   * dependabot PRs — mechanical dep bumps don't merit changesets in
 #     the lazy + snapshot model; they roll into the next regular release.
+#     A PR counts only while Dependabot opened it AND the event's actor is
+#     Dependabot or an automation the caller lists in `automation-actors`
+#     (e.g. a bot that pushes a regenerated lockfile onto the branch). A
+#     push by anyone else, a person included, re-arms the check: they may
+#     have added a real change.
 #   * release sync-back PRs whose head ref matches the opt-in
 #     `release-head-ref` input (e.g. `main`) — a main->develop release
 #     sync only deletes the consumed changesets and carries none.
@@ -36,6 +41,11 @@ on:
         type: string
         default: ''
         description: 'Newline-separated extended-regex patterns matching paths whose contents can reach a published artifact (e.g. "^packages/ui/" or "^modules/[^/]+/(web|client|types)/"). When set, a PR touching NONE of them is exempt from the changeset requirement. Empty (default) keeps the requirement unconditional, so other consumers are unaffected.'
+      automation-actors:
+        required: false
+        type: string
+        default: '[]'
+        description: 'JSON array of extra actor logins (e.g. ["my-app[bot]"]) whose pushes onto a Dependabot-opened PR keep it exempt, as Dependabot''s own pushes do. For a bot that pushes mechanical follow-ups, such as a regenerated lockfile. A PR opened by anyone other than Dependabot is never exempt, whoever pushes. Empty (default) exempts only Dependabot''s own pushes, so other consumers are unaffected.'
       runner:
         required: false
         type: string
@@ -45,7 +55,14 @@ on:
 jobs:
   check:
     name: Check
-    if: ${{ !startsWith(github.head_ref, 'changeset-release/') && github.actor != 'dependabot[bot]' }}
+    # The author is what makes a PR a dependency bump; the actor is who pushed
+    # the commit this run checks. Keying on the actor alone stopped skipping
+    # Dependabot PRs once a lockfile bot pushed to them, and keying on the
+    # author alone would skip a person's real change pushed onto one.
+    if: >-
+      ${{ !startsWith(github.head_ref, 'changeset-release/') &&
+      !(github.event.pull_request.user.login == 'dependabot[bot]' &&
+      (github.actor == 'dependabot[bot]' || contains(fromJSON(inputs.automation-actors || '[]'), github.actor))) }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 5
     steps:

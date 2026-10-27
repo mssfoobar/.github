@@ -283,6 +283,12 @@ ships, never a restatement of the PR. Skips dependabot PRs and the
 `changeset-release/*` branch automatically, and, with the opt-in
 `publishable-paths` input, any PR that touches no publishable path.
 
+A dependabot PR stays exempt only while each push to it comes from
+Dependabot or from an actor in the opt-in `automation-actors` input, a JSON
+array such as `'["my-app[bot]"]'`. List a bot there when it pushes mechanical
+commits onto Dependabot's branches, like a regenerated lockfile; otherwise its
+push makes the check run and fail. A push by anyone else runs the check.
+
 ```yaml
 on:
   pull_request:
