@@ -372,7 +372,7 @@ jobs:
             // builds against is selected too and so builds twice; publish order follows pins,
             // which leave out devDependencies, so it cannot be relied on to build it first.
             // The brace form is required: pnpm drops the ^... suffix from a bare ./path
-            // selector. The root (path .) is left out, since its brace form selects everything.
+            // selector. The root (path .) is left out: a publishing root is unsupported (see the header).
             function dependencyBuildCommand(toPublish, scriptName) {
               const filters = toPublish.filter(p => p.path !== '.').map(p => '--filter \"{./' + p.path + '}^...\"');
               if (!filters.length) return null;
