@@ -59,6 +59,8 @@ const committed = {
 		peerDependencies: { '@mssfoobar/auth-sdk': 'workspace:^2.0.0 || ^3.0.0', '@mssfoobar/logger': 'workspace:^', '@mssfoobar/ui': 'workspace:^' },
 	},
 	'modules/rag/web': { name: '@mssfoobar/rag-web-sdk', peerDependencies: { '@mssfoobar/logger': '^1.1.0' } },
+	'modules/form/types': { name: '@mssfoobar/form-types' },
+	'modules/form/client': { name: '@mssfoobar/form-client', dependencies: { '@mssfoobar/form-types': 'workspace:*' } },
 };
 const pathOf = Object.fromEntries(Object.entries(committed).map(([dir, m]) => [m.name, dir]));
 const SNAP = '-alpha.42';
@@ -95,6 +97,13 @@ const allMoved = Object.values(committed).map((m) => m.name);
 
 test('msr-web-sdk changed: its unchanged dependency msr-client publishes too', () => {
 	assert.ok(publishSet(allMoved, ['modules/msr/web/sdk/index.ts']).includes('@mssfoobar/msr-client'));
+});
+
+test('form-client changed: the types package it pins, form-types, publishes too', () => {
+	// form-client@2.1.0-alpha.1043 was published pinning form-types@2.1.0-alpha.1043, which never was.
+	const set = publishSet(allMoved, ['modules/form/client/src/index.ts']);
+	assert.ok(set.includes('@mssfoobar/form-client'));
+	assert.ok(set.includes('@mssfoobar/form-types'));
 });
 
 test('gis-web-sdk changed: its workspace peer sse-client publishes too', () => {
