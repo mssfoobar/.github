@@ -26,7 +26,7 @@ function loadGate(committed) {
 		return JSON.stringify(committed[m[1]]);
 	};
 	// A helper missing from the YAML comes back undefined, so only the tests that need it fail.
-	const names = ['computePublishSet', 'buildDepGraph', 'buildRequireGraph', 'sortForPublish'];
+	const names = ['computePublishSet', 'buildDepGraph', 'buildRequireGraph', 'sortForPublish', 'dependencyBuildCommand'];
 	const exported = names.map((n) => n + ": typeof " + n + " === 'function' ? " + n + ' : undefined').join(', ');
 	return new Function('execSync', helpers + '\nreturn { ' + exported + ' };')(execSync);
 }
@@ -248,4 +248,74 @@ test('the publish loop consumes the sorted list', () => {
 	assert.ok(sortAt > 0, 'sortForPublish is not applied to toPublish');
 	assert.ok(sortAt < yaml.indexOf('if (dryRun) {'), 'sort runs after the dry-run report');
 	assert.ok(sortAt < yaml.indexOf('for (const pkg of toPublish) {'), 'sort runs after the publish loop starts');
+});
+
+// ---- build-workspace-dependencies ----
+// Release run 40644722805: observability's prepack build failed to resolve
+// @mssfoobar/logger, a workspace:* dependency with no pending changeset, so it
+// was neither published nor built in that run.
+
+test('dependencyBuildCommand: observability builds its dependencies, not itself', () => {
+	const { gate } = gateFor([]);
+	assert.equal(
+		gate.dependencyBuildCommand([{ name: '@mssfoobar/observability', path: 'packages/observability' }], 'build'),
+		'pnpm --filter "{./packages/observability}^..." run --if-present build',
+	);
+});
+
+test('dependencyBuildCommand: several packages share one command, one filter each, in order', () => {
+	const { gate } = gateFor([]);
+	const list = [
+		{ name: '@mssfoobar/auth-sdk', path: 'packages/auth-sdk' },
+		{ name: '@mssfoobar/observability', path: 'packages/observability' },
+		{ name: '@mssfoobar/gis-web-sdk', path: 'modules/gis/web' },
+	];
+	assert.equal(
+		gate.dependencyBuildCommand(list, 'build'),
+		'pnpm --filter "{./packages/auth-sdk}^..." --filter "{./packages/observability}^..." --filter "{./modules/gis/web}^..." run --if-present build',
+	);
+});
+
+test('dependencyBuildCommand: nothing to publish means no command', () => {
+	const { gate } = gateFor([]);
+	assert.equal(gate.dependencyBuildCommand([], 'build'), null);
+});
+
+test('dependencyBuildCommand: the root is left out, and a root-only list means no command', () => {
+	const { gate } = gateFor([]);
+	assert.equal(gate.dependencyBuildCommand([{ name: 'root', path: '.' }], 'build'), null);
+	assert.equal(
+		gate.dependencyBuildCommand([{ name: 'root', path: '.' }, { name: 'b', path: 'packages/b' }], 'build'),
+		'pnpm --filter "{./packages/b}^..." run --if-present build',
+	);
+});
+
+test('dependencyBuildCommand: uses the configured script name', () => {
+	const { gate } = gateFor([]);
+	assert.equal(gate.dependencyBuildCommand([{ name: 'b', path: 'packages/b' }], 'build:lib'), 'pnpm --filter "{./packages/b}^..." run --if-present build:lib');
+});
+
+test('dependencyBuildCommand quotes paths the way the publish command does', () => {
+	// Both are double-quoted filters built inside the same node -e string.
+	const run = yaml.slice(yaml.indexOf('// ---- content gate')).replace(/\\([\\$"`])/g, '$1');
+	assert.ok(run.includes(`cmd = 'pnpm --filter "' + filter + '" publish --tag '`), 'publish filter quoting changed');
+	const { gate } = gateFor([]);
+	assert.match(gate.dependencyBuildCommand([{ name: 'b', path: 'packages/b' }], 'build'), /--filter "\{\.\/packages\/b\}\^\.\.\."/);
+});
+
+test('the dependency build runs after the sort and before the first publish, and dry-run reports it', () => {
+	const sortAt = yaml.indexOf('toPublish = sortForPublish(toPublish, requireGraph);');
+	const cmdAt = yaml.indexOf('const buildCmd = buildDeps ? dependencyBuildCommand(toPublish, buildScript) : null;');
+	const dryAt = yaml.indexOf('if (dryRun) {');
+	const runAt = yaml.indexOf('execSync(buildCmd, { stdio:');
+	const loopAt = yaml.indexOf('for (const pkg of toPublish) {');
+	assert.ok(sortAt > 0 && cmdAt > sortAt, 'command built after the sort');
+	assert.ok(yaml.slice(dryAt, runAt).includes('would build workspace dependencies first'), 'dry-run reports the build');
+	assert.ok(runAt > dryAt && runAt < loopAt, 'build runs before the publish loop');
+});
+
+test('build-workspace-dependencies defaults off and fails fast without pnpm', () => {
+	assert.match(yaml, /build-workspace-dependencies:\n\s+required: false\n\s+type: boolean\n\s+default: false/);
+	const guard = yaml.indexOf('if (buildDeps && pm !== ');
+	assert.ok(guard > 0 && guard < yaml.indexOf('// ---- content gate'), 'npm guard runs before anything publishes');
 });

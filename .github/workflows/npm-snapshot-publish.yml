@@ -22,6 +22,17 @@ name: NPM Snapshot Publish
 #     paths are split partly because of this — don't try to unify them
 #     without re-validating against an aoh-web-lib-style workspace.
 #
+# Workspace dependency builds (pnpm only, opt-in `build-workspace-dependencies`):
+# a package's own prepack/prepublishOnly builds it, but nothing builds a
+# workspace package it builds against unless that one also publishes in the
+# same run, first. A dependency without a pending changeset is not published,
+# so it is never built and the dependent's build fails to resolve it (ops-hub
+# observability on logger, Release run 40644722805). With the input on, one
+# `pnpm --filter "{./<path>}^..." run --if-present <build-script>` builds the
+# dependencies of every package about to publish, in dependency order, before
+# the first publish. Use the brace form: pnpm drops the `^...` suffix from a
+# bare `./<path>` selector and selects only that path.
+#
 # The snapshot id is `<tag>.<github.run_number>`, producing clean
 # sequential versions like `0.1.0-alpha.123` (paired with a changesets
 # config that has `prereleaseTemplate: "{tag}"` and
@@ -71,6 +82,16 @@ on:
         type: boolean
         default: false
         description: 'When true, gate publishing on git content change: only publish a version-moved package when its own dir (or a workspace-dep dir, transitively) changed in github.event.before..HEAD, plus every version-moved workspace package a published package will pin (through dependencies, optionalDependencies or peerDependencies), so no published manifest points at an unpublished snapshot. Avoids republishing packages bumped only by a long-lived pending changeset. Falls back to publishing all version-moved packages when the push base ref is unavailable (workflow_dispatch, first push, or force-push).'
+      build-workspace-dependencies:
+        required: false
+        type: boolean
+        default: false
+        description: '(pnpm only) Before publishing, build every workspace package that a package about to publish depends on (dependencies, devDependencies, optionalDependencies or peerDependencies), excluding the published packages themselves, which their own prepack/prepublishOnly builds. Needed when a package builds against a workspace dependency that does not publish in the same run. With package-manager npm the job fails before publishing anything.'
+      build-script:
+        required: false
+        type: string
+        default: 'build'
+        description: 'Script that build-workspace-dependencies runs in each dependency (`pnpm run --if-present <build-script>`, so packages without it are skipped). Letters, digits and `:._-` only.'
       dry-run:
         required: false
         type: boolean
@@ -214,6 +235,8 @@ jobs:
           PM: ${{ inputs.package-manager }}
           SKIP_UNCHANGED: ${{ inputs.skip-unchanged-content }}
           DRY_RUN: ${{ inputs.dry-run }}
+          BUILD_DEPS: ${{ inputs.build-workspace-dependencies }}
+          BUILD_SCRIPT: ${{ inputs.build-script }}
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
@@ -230,6 +253,18 @@ jobs:
             const pm = process.env.PM;
             const skipUnchanged = process.env.SKIP_UNCHANGED === 'true';
             const dryRun = process.env.DRY_RUN === 'true';
+            const buildDeps = process.env.BUILD_DEPS === 'true';
+            const buildScript = process.env.BUILD_SCRIPT || 'build';
+            // Fail before anything publishes: skipping a build the caller asked for would
+            // publish, or fail to publish, exactly as if the input were off.
+            if (buildDeps && pm !== 'pnpm') {
+              console.error('build-workspace-dependencies needs package-manager pnpm (got ' + pm + ').');
+              process.exit(1);
+            }
+            if (buildDeps && (!buildScript || /[^A-Za-z0-9:._-]/.test(buildScript))) {
+              console.error('build-script must be letters, digits and :._- only (got ' + buildScript + ').');
+              process.exit(1);
+            }
 
             // ---- pure helpers (tested by tests/npm-snapshot-publish-gate.test.mjs) ----
             const underDir = (file, dir) => dir === '.' ? true : file === dir || file.startsWith(dir + '/');
@@ -331,6 +366,18 @@ jobs:
               }
               return graph;
             }
+            // One pnpm command that builds, in dependency order, every workspace package the
+            // given packages depend on, but not the packages themselves: their own prepack or
+            // prepublishOnly builds them. A published package that another published package
+            // builds against is selected too and so builds twice; publish order follows pins,
+            // which leave out devDependencies, so it cannot be relied on to build it first.
+            // The brace form is required: pnpm drops the ^... suffix from a bare ./path
+            // selector. The root (path .) is left out, since its brace form selects everything.
+            function dependencyBuildCommand(toPublish, scriptName) {
+              const filters = toPublish.filter(p => p.path !== '.').map(p => '--filter \"{./' + p.path + '}^...\"');
+              if (!filters.length) return null;
+              return 'pnpm ' + filters.join(' ') + ' run --if-present ' + scriptName;
+            }
             function resolveBase(eventName, baseSha, headSha) {
               if (eventName !== 'push') return null;
               if (!baseSha || /^0+\$/.test(baseSha)) return null;
@@ -374,13 +421,20 @@ jobs:
             }
 
             toPublish = sortForPublish(toPublish, requireGraph);
+            const buildCmd = buildDeps ? dependencyBuildCommand(toPublish, buildScript) : null;
 
             if (dryRun) {
+              if (buildCmd) console.log('\\n[dry-run] would build workspace dependencies first:\\n\$ ' + buildCmd);
               console.log('\\n[dry-run] would publish ' + toPublish.length + ' package(s), in this order; publishing nothing.');
               for (const pkg of toPublish) console.log('  ' + pkg.name);
               process.exit(0);
             }
             if (toPublish.length === 0) { console.log('No packages to publish.'); process.exit(0); }
+
+            if (buildCmd) {
+              console.log('Building workspace dependencies of the packages to publish:\\n\$ ' + buildCmd);
+              execSync(buildCmd, { stdio: 'inherit' });
+            }
 
             console.log('Publishing ' + toPublish.length + ' package(s) with --tag ' + npmTag + ':');
             for (const pkg of toPublish) {
