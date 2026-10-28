@@ -25,7 +25,10 @@ function loadGate(committed) {
 		if (!m || !(m[1] in committed)) throw new Error('unexpected command: ' + cmd);
 		return JSON.stringify(committed[m[1]]);
 	};
-	return new Function('execSync', helpers + '\nreturn { computePublishSet, buildDepGraph, buildRequireGraph };')(execSync);
+	// A helper missing from the YAML comes back undefined, so only the tests that need it fail.
+	const names = ['computePublishSet', 'buildDepGraph', 'buildRequireGraph', 'sortForPublish'];
+	const exported = names.map((n) => n + ": typeof " + n + " === 'function' ? " + n + ' : undefined').join(', ');
+	return new Function('execSync', helpers + '\nreturn { ' + exported + ' };')(execSync);
 }
 
 // ops-hub's internal specs as committed on develop (2026-10-28).
@@ -66,7 +69,7 @@ const SNAP = '-alpha.42';
 // and any other internal range the snapshot falls outside of rewritten to the
 // snapshot version (how auth-sdk's `>=0.0.5` peer became `1.2.0-alpha.1143`
 // in the published auth-sdk 3.0.0-alpha.1143).
-function publishSet(moved, changedPaths) {
+function gateFor(moved) {
 	const gate = loadGate(committed);
 	const candidates = moved.map((name) => ({ name, path: pathOf[name], newVersion: '9.9.9' + SNAP }));
 	const readBumped = (c) => {
@@ -79,7 +82,12 @@ function publishSet(moved, changedPaths) {
 		}
 		return pkg;
 	};
-	const set = gate.computePublishSet(candidates, changedPaths, gate.buildDepGraph(candidates), gate.buildRequireGraph(candidates, readBumped));
+	return { gate, candidates, requireGraph: gate.buildRequireGraph(candidates, readBumped) };
+}
+
+function publishSet(moved, changedPaths, pinnedBy) {
+	const { gate, candidates, requireGraph } = gateFor(moved);
+	const set = gate.computePublishSet(candidates, changedPaths, gate.buildDepGraph(candidates), requireGraph, pinnedBy);
 	return [...set].sort();
 }
 
@@ -155,4 +163,59 @@ test('nothing changed: nothing publishes', () => {
 test('existing behaviour kept: a changed dependency still republishes its dependents', () => {
 	// errors changed; unh depends on it through `dependencies`.
 	assert.ok(publishSet(allMoved, ['packages/errors/src/index.ts']).includes('@mssfoobar/unh-web-sdk'));
+});
+
+test('pinnedBy names the package that pulled each pinned package in', () => {
+	const pinnedBy = {};
+	publishSet(allMoved, ['modules/iams/web/sdk/index.ts'], pinnedBy);
+	assert.equal(pinnedBy['@mssfoobar/auth-sdk'], '@mssfoobar/iams-web-sdk');
+	assert.equal(pinnedBy['@mssfoobar/sds-client'], '@mssfoobar/auth-sdk');
+	assert.equal(pinnedBy['@mssfoobar/iams-web-sdk'], undefined);
+});
+
+// pnpm list -r order in ops-hub puts packages/ before modules/, but dependents
+// such as gis-web-sdk still appear before some of what they pin. Use an order
+// with every pinner first to make the sort do the work.
+const pinnersFirst = [
+	'@mssfoobar/gis-web-sdk', '@mssfoobar/iams-web-sdk', '@mssfoobar/msr-web-sdk', '@mssfoobar/unh-web-sdk',
+	'@mssfoobar/auth-sdk', '@mssfoobar/rag-web-sdk', '@mssfoobar/sse-client', '@mssfoobar/ui', '@mssfoobar/logger',
+	'@mssfoobar/errors', '@mssfoobar/msr-client', '@mssfoobar/sds-client',
+];
+
+test('sortForPublish puts every pinned package before the package that pins it', () => {
+	const { gate, candidates, requireGraph } = gateFor(pinnersFirst);
+	const order = gate.sortForPublish(candidates, requireGraph).map((c) => c.name);
+	const before = (a, b) => assert.ok(order.indexOf(a) < order.indexOf(b), a + ' before ' + b + ' in ' + order.join(', '));
+	before('@mssfoobar/sse-client', '@mssfoobar/gis-web-sdk');
+	before('@mssfoobar/ui', '@mssfoobar/gis-web-sdk');
+	before('@mssfoobar/auth-sdk', '@mssfoobar/iams-web-sdk');
+	before('@mssfoobar/sds-client', '@mssfoobar/auth-sdk');
+	before('@mssfoobar/msr-client', '@mssfoobar/msr-web-sdk');
+	before('@mssfoobar/errors', '@mssfoobar/unh-web-sdk');
+	assert.equal(order.length, candidates.length);
+});
+
+test('sortForPublish keeps the input order when nothing pins anything', () => {
+	const { gate } = gateFor([]);
+	const list = [{ name: 'c' }, { name: 'a' }, { name: 'b' }];
+	assert.deepEqual(gate.sortForPublish(list, {}).map((c) => c.name), ['c', 'a', 'b']);
+});
+
+test('sortForPublish terminates on a cycle and still orders what depends on it', () => {
+	const { gate } = gateFor([]);
+	const list = [{ name: 'top' }, { name: 'x' }, { name: 'y' }, { name: 'leaf' }];
+	const graph = { top: ['x'], x: ['y'], y: ['x', 'leaf'] };
+	const order = gate.sortForPublish(list, graph).map((c) => c.name);
+	// leaf first (ready), then the cycle broken at x, its first member in input
+	// order (not top, which only pins the cycle), then top, whose pin x is now
+	// published, then y.
+	assert.deepEqual(order, ['leaf', 'x', 'top', 'y']);
+});
+
+test('the publish loop consumes the sorted list', () => {
+	// The sort only helps if it runs before both the dry-run report and the publish loop.
+	const sortAt = yaml.indexOf('toPublish = sortForPublish(toPublish, requireGraph);');
+	assert.ok(sortAt > 0, 'sortForPublish is not applied to toPublish');
+	assert.ok(sortAt < yaml.indexOf('if (dryRun) {'), 'sort runs after the dry-run report');
+	assert.ok(sortAt < yaml.indexOf('for (const pkg of toPublish) {'), 'sort runs after the publish loop starts');
 });

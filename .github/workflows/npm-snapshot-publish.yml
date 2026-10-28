@@ -233,7 +233,7 @@ jobs:
 
             // ---- pure helpers (tested by tests/npm-snapshot-publish-gate.test.mjs) ----
             const underDir = (file, dir) => dir === '.' ? true : file === dir || file.startsWith(dir + '/');
-            function computePublishSet(candidates, changedPaths, depGraph, requireGraph) {
+            function computePublishSet(candidates, changedPaths, depGraph, requireGraph, pinnedBy = {}) {
               const direct = new Set(candidates.filter(c => changedPaths.some(f => underDir(f, c.path))).map(c => c.name));
               const result = new Set(direct);
               let grew = true;
@@ -248,15 +248,44 @@ jobs:
               // run gave it (see buildRequireGraph), so every version-moved package a
               // published package requires must publish too, or the manifest pins a
               // version that was never published. A package added here is not itself
-              // changed, so it does not pull in its own dependents.
+              // changed, so it does not pull in its own dependents. pinnedBy records which
+              // package pulled each one in, for the log.
               const queue = [...result];
               while (queue.length) {
                 const name = queue.pop();
                 for (const d of requireGraph[name] || []) {
-                  if (!result.has(d)) { result.add(d); queue.push(d); }
+                  if (!result.has(d)) { result.add(d); pinnedBy[d] = name; queue.push(d); }
                 }
               }
               return result;
+            }
+            // Publish each pinned package before the package that pins it, so a publish that
+            // fails partway never leaves a published manifest pointing at an unpublished
+            // snapshot. Ties keep the input order. When only cycles remain, the first package
+            // in input order that is on a cycle goes next, which breaks the cycle and keeps
+            // the loop finite; packages that merely pin a cycle still wait for it.
+            function sortForPublish(list, requireGraph) {
+              const pending = new Set(list.map(c => c.name));
+              const onCycle = c => {
+                const seen = new Set();
+                const stack = [...(requireGraph[c.name] || [])];
+                while (stack.length) {
+                  const n = stack.pop();
+                  if (n === c.name) return true;
+                  if (seen.has(n) || !pending.has(n)) continue;
+                  seen.add(n);
+                  stack.push(...(requireGraph[n] || []));
+                }
+                return false;
+              };
+              const sorted = [];
+              while (pending.size) {
+                const ready = list.find(c => pending.has(c.name) && (requireGraph[c.name] || []).every(d => !pending.has(d)));
+                const next = ready || list.find(c => pending.has(c.name) && onCycle(c)) || list.find(c => pending.has(c.name));
+                sorted.push(next);
+                pending.delete(next.name);
+              }
+              return sorted;
             }
             function buildDepGraph(candidates) {
               const names = new Set(candidates.map(c => c.name));
@@ -313,6 +342,12 @@ jobs:
               } catch {}
             }
 
+            const readBumped = c => {
+              try { return JSON.parse(fs.readFileSync(c.path === '.' ? 'package.json' : c.path + '/package.json', 'utf8')); }
+              catch { return {}; }
+            };
+            const requireGraph = buildRequireGraph(candidates, readBumped);
+
             // ---- content gate ----
             let toPublish = candidates;
             if (skipUnchanged && candidates.length) {
@@ -321,21 +356,21 @@ jobs:
                 console.log('Content gate: base ref unavailable (' + process.env.EVENT_NAME + ') — publishing all ' + candidates.length + ' version-moved package(s).');
               } else {
                 const changedPaths = execSync('git diff --name-only ' + base + ' ' + process.env.HEAD_SHA, { encoding: 'utf8' }).split('\\n').filter(Boolean);
-                const readBumped = c => {
-                  try { return JSON.parse(fs.readFileSync(c.path === '.' ? 'package.json' : c.path + '/package.json', 'utf8')); }
-                  catch { return {}; }
-                };
-                const keep = computePublishSet(candidates, changedPaths, buildDepGraph(candidates), buildRequireGraph(candidates, readBumped));
+                const pinnedBy = {};
+                const keep = computePublishSet(candidates, changedPaths, buildDepGraph(candidates), requireGraph, pinnedBy);
                 const skipped = candidates.filter(c => !keep.has(c.name));
                 toPublish = candidates.filter(c => keep.has(c.name));
                 console.log('Content gate (base ' + base.slice(0, 9) + '..' + process.env.HEAD_SHA.slice(0, 9) + '):');
-                for (const c of toPublish) console.log('  publish  ' + c.name);
+                for (const c of toPublish) console.log('  publish  ' + c.name + (pinnedBy[c.name] ? ' (pinned by ' + pinnedBy[c.name] + ')' : ''));
                 for (const c of skipped) console.log('  skip     ' + c.name + ' (content unchanged)');
               }
             }
 
+            toPublish = sortForPublish(toPublish, requireGraph);
+
             if (dryRun) {
-              console.log('\\n[dry-run] would publish ' + toPublish.length + ' package(s); publishing nothing.');
+              console.log('\\n[dry-run] would publish ' + toPublish.length + ' package(s), in this order; publishing nothing.');
+              for (const pkg of toPublish) console.log('  ' + pkg.name);
               process.exit(0);
             }
             if (toPublish.length === 0) { console.log('No packages to publish.'); process.exit(0); }
