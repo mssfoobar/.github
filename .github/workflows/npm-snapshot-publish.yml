@@ -248,22 +248,29 @@ jobs:
               // run gave it (see buildRequireGraph), so every version-moved package a
               // published package requires must publish too, or the manifest pins a
               // version that was never published. A package added here is not itself
-              // changed, so it does not pull in its own dependents. pinnedBy records which
-              // package pulled each one in, for the log.
+              // changed, so it does not pull in its own dependents. pinnedBy lists, for the
+              // log, every package in the result that pins each one, in input order.
+              const pinned = new Set();
               const queue = [...result];
               while (queue.length) {
                 const name = queue.pop();
                 for (const d of requireGraph[name] || []) {
-                  if (!result.has(d)) { result.add(d); pinnedBy[d] = name; queue.push(d); }
+                  if (!result.has(d)) { result.add(d); pinned.add(d); queue.push(d); }
                 }
+              }
+              for (const c of candidates) {
+                if (!pinned.has(c.name)) continue;
+                pinnedBy[c.name] = candidates.filter(p => result.has(p.name) && (requireGraph[p.name] || []).includes(c.name)).map(p => p.name);
               }
               return result;
             }
-            // Publish each pinned package before the package that pins it, so a publish that
-            // fails partway never leaves a published manifest pointing at an unpublished
-            // snapshot. Ties keep the input order. When only cycles remain, the first package
-            // in input order that is on a cycle goes next, which breaks the cycle and keeps
-            // the loop finite; packages that merely pin a cycle still wait for it.
+            // Order the publish set so a publish that fails partway leaves no published
+            // manifest pointing at an unpublished snapshot. On an acyclic graph every pinned
+            // package publishes before each package that pins it, ties in input order.
+            // When only cycles remain, the first package in input order that is on a cycle
+            // goes next, which breaks the cycle and keeps the loop finite. Packages whose
+            // pins reach no cycle all publish first, in order; around a cycle there is no
+            // further ordering guarantee. Workspace dependency cycles are not expected.
             function sortForPublish(list, requireGraph) {
               const pending = new Set(list.map(c => c.name));
               const onCycle = c => {
@@ -361,7 +368,7 @@ jobs:
                 const skipped = candidates.filter(c => !keep.has(c.name));
                 toPublish = candidates.filter(c => keep.has(c.name));
                 console.log('Content gate (base ' + base.slice(0, 9) + '..' + process.env.HEAD_SHA.slice(0, 9) + '):');
-                for (const c of toPublish) console.log('  publish  ' + c.name + (pinnedBy[c.name] ? ' (pinned by ' + pinnedBy[c.name] + ')' : ''));
+                for (const c of toPublish) console.log('  publish  ' + c.name + (pinnedBy[c.name] ? ' (pinned by ' + pinnedBy[c.name].join(', ') + ')' : ''));
                 for (const c of skipped) console.log('  skip     ' + c.name + ' (content unchanged)');
               }
             }

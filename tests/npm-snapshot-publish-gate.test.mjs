@@ -168,9 +168,19 @@ test('existing behaviour kept: a changed dependency still republishes its depend
 test('pinnedBy names the package that pulled each pinned package in', () => {
 	const pinnedBy = {};
 	publishSet(allMoved, ['modules/iams/web/sdk/index.ts'], pinnedBy);
-	assert.equal(pinnedBy['@mssfoobar/auth-sdk'], '@mssfoobar/iams-web-sdk');
-	assert.equal(pinnedBy['@mssfoobar/sds-client'], '@mssfoobar/auth-sdk');
+	assert.deepEqual(pinnedBy['@mssfoobar/auth-sdk'], ['@mssfoobar/iams-web-sdk']);
+	assert.deepEqual(pinnedBy['@mssfoobar/sds-client'], ['@mssfoobar/auth-sdk']);
 	assert.equal(pinnedBy['@mssfoobar/iams-web-sdk'], undefined);
+});
+
+test('pinnedBy lists every pinner in the publish set, in input order', () => {
+	// gis-web-sdk and msr-web-sdk both changed, and both peer on ui and logger.
+	const pinnedBy = {};
+	publishSet(allMoved, ['modules/gis/web/sdk/index.ts', 'modules/msr/web/sdk/index.ts'], pinnedBy);
+	assert.deepEqual(pinnedBy['@mssfoobar/ui'], ['@mssfoobar/msr-web-sdk', '@mssfoobar/gis-web-sdk']);
+	assert.deepEqual(pinnedBy['@mssfoobar/logger'], ['@mssfoobar/msr-web-sdk', '@mssfoobar/gis-web-sdk']);
+	// unh-web-sdk also peers on ui but is not in the publish set.
+	assert.ok(!pinnedBy['@mssfoobar/ui'].includes('@mssfoobar/unh-web-sdk'));
 });
 
 // pnpm list -r order in ops-hub puts packages/ before modules/, but dependents
@@ -201,15 +211,26 @@ test('sortForPublish keeps the input order when nothing pins anything', () => {
 	assert.deepEqual(gate.sortForPublish(list, {}).map((c) => c.name), ['c', 'a', 'b']);
 });
 
-test('sortForPublish terminates on a cycle and still orders what depends on it', () => {
+test('sortForPublish terminates on a cycle, and packages whose pins reach no cycle stay ordered', () => {
+	// Only the guarantees: every package once, and everything outside the cycle's
+	// reach published first and in order. Around the cycle the order is unspecified.
 	const { gate } = gateFor([]);
-	const list = [{ name: 'top' }, { name: 'x' }, { name: 'y' }, { name: 'leaf' }];
-	const graph = { top: ['x'], x: ['y'], y: ['x', 'leaf'] };
+	const list = [{ name: 'top' }, { name: 'x' }, { name: 'y' }, { name: 'p' }, { name: 'leaf' }, { name: 'q' }];
+	const graph = { top: ['x'], x: ['y'], y: ['x', 'leaf'], p: ['q'] };
 	const order = gate.sortForPublish(list, graph).map((c) => c.name);
-	// leaf first (ready), then the cycle broken at x, its first member in input
-	// order (not top, which only pins the cycle), then top, whose pin x is now
-	// published, then y.
-	assert.deepEqual(order, ['leaf', 'x', 'top', 'y']);
+	assert.deepEqual([...order].sort(), ['leaf', 'p', 'q', 'top', 'x', 'y']);
+	const at = (n) => order.indexOf(n);
+	assert.ok(at('q') < at('p'), 'q before p');
+	for (const n of ['leaf', 'p', 'q']) for (const c of ['top', 'x', 'y']) assert.ok(at(n) < at(c), n + ' before ' + c);
+});
+
+test('sortForPublish breaks a cycle at its first member in input order', () => {
+	// top only pins the cycle; the first package published from it is x, a member.
+	const { gate } = gateFor([]);
+	const list = [{ name: 'top' }, { name: 'x' }, { name: 'y' }];
+	const order = gate.sortForPublish(list, { top: ['x'], x: ['y'], y: ['x'] }).map((c) => c.name);
+	assert.equal(order[0], 'x');
+	assert.equal(order.length, 3);
 });
 
 test('the publish loop consumes the sorted list', () => {
