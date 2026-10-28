@@ -70,7 +70,7 @@ on:
         required: false
         type: boolean
         default: false
-        description: 'When true, gate publishing on git content change: only publish a version-moved package when its own dir (or a workspace-dep dir, transitively) changed in github.event.before..HEAD. Avoids republishing packages bumped only by a long-lived pending changeset. Falls back to publishing all version-moved packages when the push base ref is unavailable (workflow_dispatch, first push, or force-push).'
+        description: 'When true, gate publishing on git content change: only publish a version-moved package when its own dir (or a workspace-dep dir, transitively) changed in github.event.before..HEAD, plus every version-moved workspace package a published package will pin (through dependencies, optionalDependencies or peerDependencies), so no published manifest points at an unpublished snapshot. Avoids republishing packages bumped only by a long-lived pending changeset. Falls back to publishing all version-moved packages when the push base ref is unavailable (workflow_dispatch, first push, or force-push).'
       dry-run:
         required: false
         type: boolean
@@ -231,9 +231,9 @@ jobs:
             const skipUnchanged = process.env.SKIP_UNCHANGED === 'true';
             const dryRun = process.env.DRY_RUN === 'true';
 
-            // ---- pure helpers (mirror of dev-tested snapshot-gate.mjs) ----
+            // ---- pure helpers (tested by tests/npm-snapshot-publish-gate.test.mjs) ----
             const underDir = (file, dir) => dir === '.' ? true : file === dir || file.startsWith(dir + '/');
-            function computePublishSet(candidates, changedPaths, depGraph) {
+            function computePublishSet(candidates, changedPaths, depGraph, requireGraph) {
               const direct = new Set(candidates.filter(c => changedPaths.some(f => underDir(f, c.path))).map(c => c.name));
               const result = new Set(direct);
               let grew = true;
@@ -242,6 +242,18 @@ jobs:
                 for (const c of candidates) {
                   if (result.has(c.name)) continue;
                   if ((depGraph[c.name] || []).some(d => result.has(d))) { result.add(c.name); grew = true; }
+                }
+              }
+              // A published manifest points each internal dependency at the version this
+              // run gave it (see buildRequireGraph), so every version-moved package a
+              // published package requires must publish too, or the manifest pins a
+              // version that was never published. A package added here is not itself
+              // changed, so it does not pull in its own dependents.
+              const queue = [...result];
+              while (queue.length) {
+                const name = queue.pop();
+                for (const d of requireGraph[name] || []) {
+                  if (!result.has(d)) { result.add(d); queue.push(d); }
                 }
               }
               return result;
@@ -260,6 +272,26 @@ jobs:
                   }
                 }
                 graph[c.name] = deps;
+              }
+              return graph;
+            }
+            // Edges from each candidate's bumped manifest to the candidates it will pin on
+            // publish: pnpm publish turns every workspace: spec, peers included, into the
+            // dependency's version, and changeset version rewrites any other internal range
+            // the snapshot falls outside of to the snapshot version itself.
+            function buildRequireGraph(candidates, readPkg) {
+              const byName = new Map(candidates.map(c => [c.name, c]));
+              const graph = {};
+              for (const c of candidates) {
+                const pkg = readPkg(c);
+                const req = [];
+                for (const sect of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+                  for (const [dn, spec] of Object.entries(pkg[sect] || {})) {
+                    const d = byName.get(dn);
+                    if (d && typeof spec === 'string' && (spec.startsWith('workspace:') || spec.includes(d.newVersion))) req.push(dn);
+                  }
+                }
+                graph[c.name] = req;
               }
               return graph;
             }
@@ -289,7 +321,11 @@ jobs:
                 console.log('Content gate: base ref unavailable (' + process.env.EVENT_NAME + ') — publishing all ' + candidates.length + ' version-moved package(s).');
               } else {
                 const changedPaths = execSync('git diff --name-only ' + base + ' ' + process.env.HEAD_SHA, { encoding: 'utf8' }).split('\\n').filter(Boolean);
-                const keep = computePublishSet(candidates, changedPaths, buildDepGraph(candidates));
+                const readBumped = c => {
+                  try { return JSON.parse(fs.readFileSync(c.path === '.' ? 'package.json' : c.path + '/package.json', 'utf8')); }
+                  catch { return {}; }
+                };
+                const keep = computePublishSet(candidates, changedPaths, buildDepGraph(candidates), buildRequireGraph(candidates, readBumped));
                 const skipped = candidates.filter(c => !keep.has(c.name));
                 toPublish = candidates.filter(c => keep.has(c.name));
                 console.log('Content gate (base ' + base.slice(0, 9) + '..' + process.env.HEAD_SHA.slice(0, 9) + '):');

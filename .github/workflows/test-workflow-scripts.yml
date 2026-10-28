@@ -1,0 +1,24 @@
+name: Test workflow scripts
+
+# Runs the tests for logic that lives inline in a reusable workflow, such as
+# npm-snapshot-publish's content gate (tests/npm-snapshot-publish-gate.test.mjs).
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/npm-snapshot-publish.yml'
+      - '.github/workflows/test-workflow-scripts.yml'
+      - 'tests/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tests/*.test.mjs
