@@ -1,0 +1,272 @@
+# Cache what anthropics/claude-code-action downloads on every run: the Claude
+# Code binary, Bun, and Bun's install cache for the action's own dependencies.
+#
+# Measured on x64 ubuntu:24.04 with zstd, claude-code-action e4a6faa: Claude
+# Code 2.1.305 215 MiB, Bun 1.3.14 34 MiB, `bun install --production` 259 MiB
+# (nearly all of it the SDK's optional native Claude binaries) — about 0.5 GiB
+# a run, through the NAT on a self-hosted runner. A warm install cache makes
+# the action's `bun install` download nothing.
+#
+# ONE HOME FOR THE KEYS. Callers that read (a review job) and the job that
+# writes (a warmer) both take their keys and paths from this action, so they
+# cannot drift. The versions come from the claude-code-action checkout itself:
+# its `bun-version:` and its `claudeCodeVersion` literal, read at the SHA the
+# caller passes. Exact keys only, never restore-keys: another version's binary
+# must never be used.
+#
+# READ ONLY. This action restores; it never saves. A job that checks out pull
+# request content must not be able to write an entry another job runs, so the
+# writer is a separate job that runs no PR code and saves with this action's
+# `*-dir` and `*-key` outputs (`restore: 'false'` computes them only). Give
+# the reader credentials that can only read (GetObject and ListBucket on
+# cache/<repo>/), produced without exporting them to the job's environment.
+#
+# THE WRITER MUST MATCH THE READER: the same repository (runs-on/cache keys
+# objects under cache/<repo>/), the same runner type and HOME, and not a
+# container job, or every restore silently misses. And `action-ref` must move
+# with the claude-code-action `uses:` SHA it describes; a stale one warns and
+# runs cold.
+#
+# FAILS OPEN. Any problem — no credentials, a miss, a binary that does not match
+# its published checksum or the pinned version — leaves `claude-path` / `bun-path` empty, and the action
+# installs as it always has. Pass them straight to `path_to_claude_code_executable`
+# / `path_to_bun_executable`: empty is those inputs' default.
+#
+# The S3 backend is runs-on/cache's: it is used when RUNS_ON_S3_BUCKET_CACHE is
+# defined, which only the restore steps do, with step-scoped credentials.
+name: Claude Code cache
+description: Keys for, and restore of, the Claude Code binary, Bun and the action's dependency cache. Read only; fails open.
+inputs:
+  action-ref:
+    description: The anthropics/claude-code-action commit SHA the job runs (40 hex).
+    required: true
+  action-dir:
+    description: That action's checkout. Defaults to the runner's copy, which it downloads for every `uses:` at job setup.
+    default: ''
+  restore:
+    description: "'true' to restore; 'false' to compute keys and paths only (the writer)."
+    default: 'true'
+  bucket:
+    description: The S3 cache bucket. Empty restores nothing.
+    default: ''
+  aws-region:
+    default: ap-southeast-1
+  aws-access-key-id:
+    default: ''
+  aws-secret-access-key:
+    default: ''
+  aws-session-token:
+    default: ''
+outputs:
+  ok:
+    description: "'true' when the keys could be derived."
+    value: ${{ steps.keys.outputs.ok }}
+  claude-version:
+    value: ${{ steps.keys.outputs.claude-version }}
+  bun-version:
+    value: ${{ steps.keys.outputs.bun-version }}
+  root:
+    description: "The absolute directory holding all three entries: claude/claude, bun/<bun-zip>, bun-install/. For the writer's own commands; the `*-dir` outputs are `~` strings for runs-on/cache's `path:` only."
+    value: ${{ steps.keys.outputs.root }}
+  claude-key:
+    value: ${{ steps.keys.outputs.claude-key }}
+  claude-dir:
+    value: ${{ steps.keys.outputs.claude-dir }}
+  claude-platform:
+    description: The platform name in Claude Code's release manifest, e.g. linux-x64.
+    value: ${{ steps.keys.outputs.claude-platform }}
+  bun-zip:
+    description: The Bun release archive for this runner, e.g. bun-linux-x64.zip. The Bun entry holds it, as published, in `bun-dir`.
+    value: ${{ steps.keys.outputs.bun-zip }}
+  bun-key:
+    value: ${{ steps.keys.outputs.bun-key }}
+  bun-dir:
+    value: ${{ steps.keys.outputs.bun-dir }}
+  deps-key:
+    value: ${{ steps.keys.outputs.deps-key }}
+  deps-dir:
+    value: ${{ steps.keys.outputs.deps-dir }}
+  claude-path:
+    description: The restored, version-checked Claude Code binary, or empty.
+    value: ${{ steps.verify.outputs.claude-path }}
+  bun-path:
+    description: The restored, version-checked Bun binary, or empty.
+    value: ${{ steps.verify.outputs.bun-path }}
+runs:
+  using: composite
+  steps:
+    - id: keys
+      continue-on-error: true
+      shell: bash
+      env:
+        REF: ${{ inputs.action-ref }}
+        ACTION_DIR: ${{ inputs.action-dir }}
+      run: |
+        # ---- keys
+        # The runner starts this with -e; a failed lookup must warn, not abort.
+        set +e -uo pipefail
+        fail() { echo "::warning title=Claude Code cache::$1; the action installs as usual"; echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0; }
+        [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || fail "action-ref is not a 40-hex commit SHA"
+        [ -n "$ACTION_DIR" ] || [ -n "${RUNNER_WORKSPACE:-}" ] || fail "no action-dir, and no RUNNER_WORKSPACE to find the runner's copy"
+        [ -n "${HOME:-}" ] || fail "no HOME"
+        dir=${ACTION_DIR:-${RUNNER_WORKSPACE:-}/../_actions/anthropics/claude-code-action/$REF}
+        [ -f "$dir/action.yml" ] || fail "no claude-code-action checkout at $dir"
+        claude=$(sed -n 's/^ *const claudeCodeVersion = "\([0-9][0-9.]*\)";.*/\1/p' "$dir/src/entrypoints/run.ts" 2>/dev/null | head -1)
+        bun=$(sed -n 's/^ *bun-version: *\([0-9][0-9.]*\) *$/\1/p' "$dir/action.yml" | head -1)
+        [[ "$claude" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "could not read the Claude Code version from $dir/src/entrypoints/run.ts"
+        [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "could not read the Bun version from $dir/action.yml"
+        [ -f "$dir/bun.lock" ] || fail "no bun.lock in $dir"
+        deps=$( { cat "$dir/bun.lock" "$dir/package.json"; echo "bun $bun"; } | sha256sum | cut -c1-16)
+        os=${RUNNER_OS}-${RUNNER_ARCH}
+        # Platform names as the publishers use them: Claude Code's manifest
+        # (linux-x64, linux-x64-musl, …) and Bun's release zips.
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) arch=x64 bunarch=x64 ;;
+          Linux-ARM64) arch=arm64 bunarch=aarch64 ;;
+          *) fail "no published Claude Code build is known for $RUNNER_OS-$RUNNER_ARCH" ;;
+        esac
+        libc=; { [ -f /lib/libc.musl-x86_64.so.1 ] || [ -f /lib/libc.musl-aarch64.so.1 ]; } && libc=-musl
+        # The paths are literal, with `~`: runs-on/cache versions an entry by
+        # its path strings, so reader and writer must pass the same ones.
+        {
+          echo "ok=true"
+          echo "root=$HOME/.cache/claude-code-cache"
+          echo "claude-version=$claude"
+          echo "bun-version=$bun"
+          echo "claude-key=claude-code-$claude-$os"
+          echo "claude-dir=~/.cache/claude-code-cache/claude"
+          echo "claude-platform=linux-$arch$libc"
+          echo "bun-zip=bun-linux-$bunarch$libc.zip"
+          echo "bun-key=bun-$bun-$os"
+          echo "bun-dir=~/.cache/claude-code-cache/bun"
+          echo "deps-key=claude-code-action-deps-$deps-$os"
+          echo "deps-dir=~/.cache/claude-code-cache/bun-install"
+        } >> "$GITHUB_OUTPUT"
+        # ---- end keys
+
+    - id: claude
+      if: inputs.restore == 'true' && inputs.bucket != '' && inputs.aws-access-key-id != '' && steps.keys.outputs.ok == 'true'
+      continue-on-error: true
+      uses: runs-on/cache/restore@88d90644011a3a9957fd141a106f5a94f9794203 # v5.0.7
+      env:
+        RUNS_ON_S3_BUCKET_CACHE: ${{ inputs.bucket }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_SESSION_TOKEN: ${{ inputs.aws-session-token }}
+      with:
+        path: ${{ steps.keys.outputs.claude-dir }}
+        key: ${{ steps.keys.outputs.claude-key }}
+
+    - id: bun
+      if: inputs.restore == 'true' && inputs.bucket != '' && inputs.aws-access-key-id != '' && steps.keys.outputs.ok == 'true'
+      continue-on-error: true
+      uses: runs-on/cache/restore@88d90644011a3a9957fd141a106f5a94f9794203 # v5.0.7
+      env:
+        RUNS_ON_S3_BUCKET_CACHE: ${{ inputs.bucket }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_SESSION_TOKEN: ${{ inputs.aws-session-token }}
+      with:
+        path: ${{ steps.keys.outputs.bun-dir }}
+        key: ${{ steps.keys.outputs.bun-key }}
+
+    - id: deps
+      if: inputs.restore == 'true' && inputs.bucket != '' && inputs.aws-access-key-id != '' && steps.keys.outputs.ok == 'true'
+      continue-on-error: true
+      uses: runs-on/cache/restore@88d90644011a3a9957fd141a106f5a94f9794203 # v5.0.7
+      env:
+        RUNS_ON_S3_BUCKET_CACHE: ${{ inputs.bucket }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_SESSION_TOKEN: ${{ inputs.aws-session-token }}
+      with:
+        path: ${{ steps.keys.outputs.deps-dir }}
+        key: ${{ steps.keys.outputs.deps-key }}
+
+    # A restored executable is used, or even run, only once it matches the
+    # checksum its publisher lists for that version and platform — Claude
+    # Code's release manifest (2 KB), Bun's SHASUMS256.txt — and then reports
+    # that version. That catches a wrong, corrupt or swapped binary. It is not
+    # the trust boundary: runs-on/cache extracts an entry's archive before this
+    # step, and an archive can write outside its directory, so every entry, the
+    # dependency cache included, rests on the bucket's write isolation (only
+    # the protected-branch writer's role may write it).
+    - id: verify
+      if: inputs.restore == 'true' && steps.keys.outputs.ok == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        CLAUDE_HIT: ${{ steps.claude.outputs.cache-hit }}
+        BUN_HIT: ${{ steps.bun.outputs.cache-hit }}
+        DEPS_HIT: ${{ steps.deps.outputs.cache-hit }}
+        CLAUDE_VERSION: ${{ steps.keys.outputs.claude-version }}
+        CLAUDE_PLATFORM: ${{ steps.keys.outputs.claude-platform }}
+        BUN_VERSION: ${{ steps.keys.outputs.bun-version }}
+        BUN_ZIP: ${{ steps.keys.outputs.bun-zip }}
+        DISABLE_AUTOUPDATER: '1'
+      run: |
+        # ---- verify
+        # The runner starts this with -e; a failed lookup must warn and move on
+        # to the next entry, not abort.
+        set +e -uo pipefail
+        root="$HOME/.cache/claude-code-cache"
+        # Fixed, never read from the environment: an earlier step could set one.
+        claude_base=https://downloads.claude.ai/claude-code-releases
+        bun_base=https://github.com/oven-sh/bun/releases/download
+        note() { echo "::warning title=Claude Code cache::$1; the action installs it as usual"; }
+        # Each executable is checked, run and handed over as a COPY in a fresh
+        # directory: the action puts the path's directory on PATH, so nothing
+        # else restored beside it may be there, and the file checked is the
+        # file used.
+        fresh() { mktemp -d "${RUNNER_TEMP:-/tmp}/claude-code-cache.XXXXXX"; }
+        if [ "$CLAUDE_HIT" = true ]; then
+          bin="$(fresh)/claude"
+          cp "$root/claude/claude" "$bin" 2>/dev/null && chmod 0755 "$bin"
+          want=$(curl -fsSL --proto =https --max-time 20 "$claude_base/$CLAUDE_VERSION/manifest.json" 2>/dev/null | tr -d '\n' |
+            sed -n "s/.*\"$CLAUDE_PLATFORM\"[[:space:]]*:[[:space:]]*{[^{}]*\"checksum\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]\{64\}\)\".*/\1/p")
+          got=$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)
+          # Nothing restored runs before its checksum matches: it would run
+          # with this step's GITHUB_OUTPUT and GITHUB_ENV.
+          if [ -z "$want" ]; then
+            note "could not read Claude Code $CLAUDE_VERSION's published checksum"
+          elif [ "$got" != "$want" ]; then
+            note "the cached Claude Code does not match its published checksum"
+          elif ver=$(timeout 30 "$bin" --version 2>/dev/null | head -1); [[ "$ver" != "$CLAUDE_VERSION "* && "$ver" != "$CLAUDE_VERSION" ]]; then
+            note "the cached Claude Code reports '${ver:-nothing}', not $CLAUDE_VERSION"
+          else
+            echo "claude-path=$bin" >> "$GITHUB_OUTPUT"
+            echo "Claude Code cache: $CLAUDE_VERSION restored and verified"
+          fi
+        else
+          echo "Claude Code cache: no entry for $CLAUDE_VERSION"
+        fi
+        if [ "$BUN_HIT" = true ]; then
+          dir=$(fresh)
+          zip="$dir/$BUN_ZIP"
+          cp "$root/bun/$BUN_ZIP" "$zip" 2>/dev/null
+          want=$(curl -fsSL --proto =https --max-time 20 "$bun_base/bun-v$BUN_VERSION/SHASUMS256.txt" 2>/dev/null | awk -v f="$BUN_ZIP" '$2 == f { print $1 }')
+          got=$(sha256sum "$zip" 2>/dev/null | cut -d' ' -f1)
+          if [ -z "$want" ]; then
+            note "could not read Bun $BUN_VERSION's published checksum"
+          elif [ "$got" != "$want" ]; then
+            note "the cached Bun does not match its published checksum"
+          elif ! unzip -qoj "$zip" '*/bun' -d "$dir/bin" 2>/dev/null; then
+            note "the cached Bun archive would not extract"
+          elif [ "$(timeout 30 "$dir/bin/bun" --version 2>/dev/null)" != "$BUN_VERSION" ]; then
+            note "the cached Bun does not report $BUN_VERSION"
+          else
+            echo "bun-path=$dir/bin/bun" >> "$GITHUB_OUTPUT"
+            echo "Bun cache: $BUN_VERSION restored and verified"
+          fi
+        else
+          echo "Bun cache: no entry for $BUN_VERSION"
+        fi
+        if [ "$DEPS_HIT" = true ]; then
+          echo "BUN_INSTALL_CACHE_DIR=$root/bun-install" >> "$GITHUB_ENV"
+          echo "Dependency cache: restored"
+        fi
+        exit 0
+        # ---- end verify

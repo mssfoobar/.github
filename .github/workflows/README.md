@@ -409,6 +409,50 @@ Inputs: `runner`, `model`, `max_turns` (default 80), `timeout_minutes`
 (default 40), `review_instructions`, `allow_oauth_fallback`, `allowed_bots`,
 `report_failure` (default `true`).
 
+#### `.github/actions/claude-code-cache` (composite action)
+
+Keys for, and a read-only restore of, what `anthropics/claude-code-action`
+downloads on every run: the Claude Code binary, Bun, and Bun's install cache
+for the action's own dependencies (about 0.5 GiB a run, measured on x64). The
+versions are read from the action's checkout at the SHA you pass, and every
+key is exact.
+
+- A restored Claude Code binary is used, or even run, only once it matches
+  the checksum in Claude Code's release manifest for that version and
+  platform, and then reports that version. The Bun entry is the release zip,
+  checked against Bun's `SHASUMS256.txt`. This catches a wrong or corrupt
+  binary; the trust model still rests on the bucket's write isolation, since
+  an entry's archive is extracted before any check.
+- Any miss, mismatch, unreadable checksum or missing credential leaves
+  `claude-path` and `bun-path` empty, so the action installs as usual. No step
+  can fail the job.
+- Bump `action-ref` together with the `uses:` SHA it describes. A stale one
+  warns and runs cold.
+- Give the reader credentials that can only read the cache prefix
+  (`GetObject`, `ListBucket` on `cache/<repo>/`), produced without exporting
+  them to the job's environment.
+
+It never saves. Whatever writes the entries must run no pull request code: a
+separate job on a protected branch calls it with `restore: 'false'` for the
+keys and paths, installs the pinned versions under its `root` output, and
+saves with `runs-on/cache/save`. The writer must run in the same repository,
+on the same runner type and not in a container job, or every restore misses.
+
+```yaml
+- id: cc-cache
+  uses: mssfoobar/.github/.github/actions/claude-code-cache@<sha>
+  with:
+    action-ref: <the claude-code-action SHA below>
+    bucket: my-ci-cache
+    aws-access-key-id: ${{ steps.aws.outputs.aws-access-key-id }}
+    aws-secret-access-key: ${{ steps.aws.outputs.aws-secret-access-key }}
+    aws-session-token: ${{ steps.aws.outputs.aws-session-token }}
+- uses: anthropics/claude-code-action@<sha>
+  with:
+    path_to_claude_code_executable: ${{ steps.cc-cache.outputs.claude-path }}
+    path_to_bun_executable: ${{ steps.cc-cache.outputs.bun-path }}
+```
+
 #### `npm-snapshot-publish.yml`
 
 Publishes a snapshot version on every push to develop or `*/rc`. Mutates
