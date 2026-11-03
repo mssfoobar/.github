@@ -215,7 +215,7 @@ jobs:
         if: steps.auth.outputs.method != 'skip'
         # v6, per the official examples. v4 targets Node 20, which GitHub now
         # force-runs on Node 24 and warns about on every run.
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # depth 1, matching the official examples. The action checks out the
           # PR branch, and the review reads the diff through `gh pr diff` (an
@@ -237,7 +237,7 @@ jobs:
         continue-on-error: true
         # A hung STS, S3 or extract must not eat the review's own timeout.
         timeout-minutes: 5
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ inputs.cache_role_arn }}
           aws-region: ${{ inputs.cache_region }}
