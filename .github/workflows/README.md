@@ -415,21 +415,32 @@ Keys for, and a read-only restore of, what `anthropics/claude-code-action`
 downloads on every run: the Claude Code binary, Bun, and Bun's install cache
 for the action's own dependencies (about 0.5 GiB a run, measured on x64). The
 versions are read from the action's checkout at the SHA you pass, and every
-key is exact. A restored binary is used only if it reports the pinned
-version. Any miss, mismatch or missing credential leaves `claude-path` and
-`bun-path` empty, so the action installs as usual. No step can fail the job.
+key is exact.
+
+- A restored Claude Code binary is used only if it matches the checksum in
+  Claude Code's release manifest for that version and platform, and reports
+  that version. The Bun entry is the release zip, checked against Bun's
+  `SHASUMS256.txt`.
+- Any miss, mismatch, unreadable checksum or missing credential leaves
+  `claude-path` and `bun-path` empty, so the action installs as usual. No step
+  can fail the job.
+- Bump `action-ref` together with the `uses:` SHA it describes. A stale one
+  warns and runs cold.
+- Give the reader credentials that can only read the cache prefix
+  (`GetObject`, `ListBucket` on `cache/<repo>/`), produced without exporting
+  them to the job's environment.
 
 It never saves. Whatever writes the entries must run no pull request code: a
-separate job, on a protected branch, calls it with `restore: 'false'` for the
-keys and paths, installs the pinned versions, and saves with
-`runs-on/cache/save`. The backend is runs-on/cache's S3 one, with credentials
-passed as inputs and kept out of the job's environment.
+separate job on a protected branch calls it with `restore: 'false'` for the
+keys and paths, installs the pinned versions under its `root` output, and
+saves with `runs-on/cache/save`. The writer must run in the same repository,
+on the same runner type and not in a container job, or every restore misses.
 
 ```yaml
 - id: cc-cache
   uses: mssfoobar/.github/.github/actions/claude-code-cache@<sha>
   with:
-    action-ref: <the claude-code-action SHA this job uses>
+    action-ref: <the claude-code-action SHA below>
     bucket: my-ci-cache
     aws-access-key-id: ${{ steps.aws.outputs.aws-access-key-id }}
     aws-secret-access-key: ${{ steps.aws.outputs.aws-secret-access-key }}

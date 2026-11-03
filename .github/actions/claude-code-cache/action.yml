@@ -17,10 +17,18 @@
 # READ ONLY. This action restores; it never saves. A job that checks out pull
 # request content must not be able to write an entry another job runs, so the
 # writer is a separate job that runs no PR code and saves with this action's
-# `*-dir` and `*-key` outputs (`restore: 'false'` computes them only).
+# `*-dir` and `*-key` outputs (`restore: 'false'` computes them only). Give
+# the reader credentials that can only read (GetObject and ListBucket on
+# cache/<repo>/), produced without exporting them to the job's environment.
 #
-# FAILS OPEN. Any problem — no credentials, a miss, a binary whose version is
-# not the pinned one — leaves `claude-path` / `bun-path` empty, and the action
+# THE WRITER MUST MATCH THE READER: the same repository (runs-on/cache keys
+# objects under cache/<repo>/), the same runner type and HOME, and not a
+# container job, or every restore silently misses. And `action-ref` must move
+# with the claude-code-action `uses:` SHA it describes; a stale one warns and
+# runs cold.
+#
+# FAILS OPEN. Any problem — no credentials, a miss, a binary that does not match
+# its published checksum or the pinned version — leaves `claude-path` / `bun-path` empty, and the action
 # installs as it always has. Pass them straight to `path_to_claude_code_executable`
 # / `path_to_bun_executable`: empty is those inputs' default.
 #
@@ -57,10 +65,19 @@ outputs:
     value: ${{ steps.keys.outputs.claude-version }}
   bun-version:
     value: ${{ steps.keys.outputs.bun-version }}
+  root:
+    description: "The absolute directory holding all three entries: claude/claude, bun/<bun-zip>, bun-install/. For the writer's own commands; the `*-dir` outputs are `~` strings for runs-on/cache's `path:` only."
+    value: ${{ steps.keys.outputs.root }}
   claude-key:
     value: ${{ steps.keys.outputs.claude-key }}
   claude-dir:
     value: ${{ steps.keys.outputs.claude-dir }}
+  claude-platform:
+    description: The platform name in Claude Code's release manifest, e.g. linux-x64.
+    value: ${{ steps.keys.outputs.claude-platform }}
+  bun-zip:
+    description: The Bun release archive for this runner, e.g. bun-linux-x64.zip. The Bun entry holds it, as published, in `bun-dir`.
+    value: ${{ steps.keys.outputs.bun-zip }}
   bun-key:
     value: ${{ steps.keys.outputs.bun-key }}
   bun-dir:
@@ -89,23 +106,36 @@ runs:
         set -uo pipefail
         fail() { echo "::warning title=Claude Code cache::$1; the action installs as usual"; echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0; }
         [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || fail "action-ref is not a 40-hex commit SHA"
-        dir=${ACTION_DIR:-$RUNNER_WORKSPACE/../_actions/anthropics/claude-code-action/$REF}
+        [ -n "$ACTION_DIR" ] || [ -n "${RUNNER_WORKSPACE:-}" ] || fail "no action-dir, and no RUNNER_WORKSPACE to find the runner's copy"
+        [ -n "${HOME:-}" ] || fail "no HOME"
+        dir=${ACTION_DIR:-${RUNNER_WORKSPACE:-}/../_actions/anthropics/claude-code-action/$REF}
         [ -f "$dir/action.yml" ] || fail "no claude-code-action checkout at $dir"
         claude=$(sed -n 's/^ *const claudeCodeVersion = "\([0-9][0-9.]*\)";.*/\1/p' "$dir/src/entrypoints/run.ts" 2>/dev/null | head -1)
         bun=$(sed -n 's/^ *bun-version: *\([0-9][0-9.]*\) *$/\1/p' "$dir/action.yml" | head -1)
         [[ "$claude" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "could not read the Claude Code version from $dir/src/entrypoints/run.ts"
         [[ "$bun" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "could not read the Bun version from $dir/action.yml"
         [ -f "$dir/bun.lock" ] || fail "no bun.lock in $dir"
-        deps=$(cat "$dir/bun.lock" "$dir/package.json" | sha256sum | cut -c1-16)
+        deps=$( { cat "$dir/bun.lock" "$dir/package.json"; echo "bun $bun"; } | sha256sum | cut -c1-16)
         os=${RUNNER_OS}-${RUNNER_ARCH}
+        # Platform names as the publishers use them: Claude Code's manifest
+        # (linux-x64, linux-x64-musl, …) and Bun's release zips.
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) arch=x64 bunarch=x64 ;;
+          Linux-ARM64) arch=arm64 bunarch=aarch64 ;;
+          *) fail "no published Claude Code build is known for $RUNNER_OS-$RUNNER_ARCH" ;;
+        esac
+        libc=; { [ -f /lib/libc.musl-x86_64.so.1 ] || [ -f /lib/libc.musl-aarch64.so.1 ]; } && libc=-musl
         # The paths are literal, with `~`: runs-on/cache versions an entry by
         # its path strings, so reader and writer must pass the same ones.
         {
           echo "ok=true"
+          echo "root=$HOME/.cache/claude-code-cache"
           echo "claude-version=$claude"
           echo "bun-version=$bun"
           echo "claude-key=claude-code-$claude-$os"
           echo "claude-dir=~/.cache/claude-code-cache/claude"
+          echo "claude-platform=linux-$arch$libc"
+          echo "bun-zip=bun-linux-$bunarch$libc.zip"
           echo "bun-key=bun-$bun-$os"
           echo "bun-dir=~/.cache/claude-code-cache/bun"
           echo "deps-key=claude-code-action-deps-$deps-$os"
@@ -155,8 +185,12 @@ runs:
         path: ${{ steps.keys.outputs.deps-dir }}
         key: ${{ steps.keys.outputs.deps-key }}
 
-    # Uses a restored binary only if it reports the pinned version: an entry is
-    # keyed on its version, so a mismatch means a bad entry, never a newer one.
+    # A restored executable is used only if it matches the checksum its
+    # publisher lists for that version and platform — Claude Code's release
+    # manifest (2 KB), Bun's SHASUMS256.txt — and then reports that version. So
+    # an entry is trusted for what it is, not for who could write it. The
+    # dependency cache has no published checksum: it relies on the bucket's
+    # write isolation (only the protected-branch writer's role may write it).
     - id: verify
       if: inputs.restore == 'true' && steps.keys.outputs.ok == 'true'
       continue-on-error: true
@@ -166,37 +200,55 @@ runs:
         BUN_HIT: ${{ steps.bun.outputs.cache-hit }}
         DEPS_HIT: ${{ steps.deps.outputs.cache-hit }}
         CLAUDE_VERSION: ${{ steps.keys.outputs.claude-version }}
+        CLAUDE_PLATFORM: ${{ steps.keys.outputs.claude-platform }}
         BUN_VERSION: ${{ steps.keys.outputs.bun-version }}
+        BUN_ZIP: ${{ steps.keys.outputs.bun-zip }}
         DISABLE_AUTOUPDATER: '1'
       run: |
         # ---- verify
         set -uo pipefail
         root="$HOME/.cache/claude-code-cache"
+        claude_base=${CLAUDE_RELEASES:-https://downloads.claude.ai/claude-code-releases}
+        bun_base=${BUN_RELEASES:-https://github.com/oven-sh/bun/releases/download}
         note() { echo "::warning title=Claude Code cache::$1; the action installs it as usual"; }
         if [ "$CLAUDE_HIT" = true ]; then
-          got=$(timeout 30 "$root/claude/claude" --version 2>/dev/null | head -1)
-          if [[ "$got" == "$CLAUDE_VERSION "* || "$got" == "$CLAUDE_VERSION" ]]; then
-            echo "claude-path=$root/claude/claude" >> "$GITHUB_OUTPUT"
-            echo "Claude Code cache: $CLAUDE_VERSION restored"
+          bin="$root/claude/claude"
+          want=$(curl -fsSL --max-time 20 "$claude_base/$CLAUDE_VERSION/manifest.json" 2>/dev/null | tr -d '\n' |
+            sed -n "s/.*\"$CLAUDE_PLATFORM\"[[:space:]]*:[[:space:]]*{[^{}]*\"checksum\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]\{64\}\)\".*/\1/p")
+          got=$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)
+          ver=$(timeout 30 "$bin" --version 2>/dev/null | head -1)
+          if [ -z "$want" ]; then
+            note "could not read Claude Code $CLAUDE_VERSION's published checksum"
+          elif [ "$got" != "$want" ]; then
+            note "the cached Claude Code does not match its published checksum"
+          elif [[ "$ver" != "$CLAUDE_VERSION "* && "$ver" != "$CLAUDE_VERSION" ]]; then
+            note "the cached Claude Code reports '${ver:-nothing}', not $CLAUDE_VERSION"
           else
-            note "the cached Claude Code reports '${got:-nothing}', not $CLAUDE_VERSION"
+            echo "claude-path=$bin" >> "$GITHUB_OUTPUT"
+            echo "Claude Code cache: $CLAUDE_VERSION restored and verified"
           fi
         else
           echo "Claude Code cache: no entry for $CLAUDE_VERSION"
         fi
         if [ "$BUN_HIT" = true ]; then
-          got=$(timeout 30 "$root/bun/bun" --version 2>/dev/null | head -1)
-          if [ "$got" = "$BUN_VERSION" ]; then
-            echo "bun-path=$root/bun/bun" >> "$GITHUB_OUTPUT"
-            echo "Bun cache: $BUN_VERSION restored"
+          zip=$BUN_ZIP
+          want=$(curl -fsSL --max-time 20 "$bun_base/bun-v$BUN_VERSION/SHASUMS256.txt" 2>/dev/null | awk -v f="$zip" '$2 == f { print $1 }')
+          got=$(sha256sum "$root/bun/$zip" 2>/dev/null | cut -d' ' -f1)
+          if [ -z "$want" ]; then
+            note "could not read Bun $BUN_VERSION's published checksum"
+          elif [ "$got" != "$want" ]; then
+            note "the cached Bun does not match its published checksum"
+          elif ! unzip -qoj "$root/bun/$zip" '*/bun' -d "$root/bun/bin" 2>/dev/null; then
+            note "the cached Bun archive would not extract"
+          elif [ "$(timeout 30 "$root/bun/bin/bun" --version 2>/dev/null)" != "$BUN_VERSION" ]; then
+            note "the cached Bun does not report $BUN_VERSION"
           else
-            note "the cached Bun reports '${got:-nothing}', not $BUN_VERSION"
+            echo "bun-path=$root/bun/bin/bun" >> "$GITHUB_OUTPUT"
+            echo "Bun cache: $BUN_VERSION restored and verified"
           fi
         else
           echo "Bun cache: no entry for $BUN_VERSION"
         fi
-        # The install cache has no version to check: it is keyed on the
-        # lockfile, and bun downloads whatever it lacks.
         if [ "$DEPS_HIT" = true ]; then
           echo "BUN_INSTALL_CACHE_DIR=$root/bun-install" >> "$GITHUB_ENV"
           echo "Dependency cache: restored"

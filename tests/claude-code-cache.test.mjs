@@ -28,7 +28,7 @@ function run(script, env) {
 	const genv = path.join(dir, 'env');
 	fs.writeFileSync(out, '');
 	fs.writeFileSync(genv, '');
-	const stdout = execFileSync('bash', ['-c', script], { env: { PATH: process.env.PATH, GITHUB_OUTPUT: out, GITHUB_ENV: genv, RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', ...env }, encoding: 'utf8' });
+	const stdout = execFileSync('bash', ['-c', script], { env: { PATH: process.env.PATH, HOME: process.env.HOME, GITHUB_OUTPUT: out, GITHUB_ENV: genv, RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', ...env }, encoding: 'utf8' });
 	const outputs = Object.fromEntries(fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 	return { stdout, outputs, env: fs.readFileSync(genv, 'utf8') };
 }
@@ -53,6 +53,7 @@ test('keys: versions come from the action checkout, keyed by OS and arch, at lit
 	assert.equal(outputs['claude-dir'], '~/.cache/claude-code-cache/claude');
 	assert.equal(outputs['bun-dir'], '~/.cache/claude-code-cache/bun');
 	assert.equal(outputs['deps-dir'], '~/.cache/claude-code-cache/bun-install');
+	assert.equal(outputs.root, `${process.env.HOME}/.cache/claude-code-cache`);
 });
 
 test('keys: another lockfile is another dependency key', () => {
@@ -88,54 +89,122 @@ for (const [name, env] of [
 	});
 }
 
-function home({ claude, bun, deps = false } = {}) {
+// A fake publisher: Claude Code's manifest and Bun's SHASUMS256.txt, served
+// from file:// URLs, listing the checksums of whatever the test passes.
+import crypto from 'node:crypto';
+const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+function fakeExe(p, out) {
+	fs.mkdirSync(path.dirname(p), { recursive: true });
+	fs.writeFileSync(p, `#!/bin/sh\necho '${out}'\n`, { mode: 0o755 });
+}
+function home({ claude, bun, deps = false, claudeSum, bunSum } = {}) {
 	const h = tmp();
 	const root = path.join(h, '.cache/claude-code-cache');
-	const fake = (p, v) => {
-		fs.mkdirSync(path.dirname(p), { recursive: true });
-		fs.writeFileSync(p, `#!/bin/sh\necho '${v}'\n`, { mode: 0o755 });
-	};
-	if (claude) fake(path.join(root, 'claude/claude'), claude);
-	if (bun) fake(path.join(root, 'bun/bun'), bun);
+	const pub = tmp();
+	if (claude !== undefined) fakeExe(path.join(root, 'claude/claude'), claude);
+	if (bun !== undefined) {
+		const stage = tmp();
+		fakeExe(path.join(stage, 'bun-linux-x64/bun'), bun);
+		fs.mkdirSync(path.join(root, 'bun'), { recursive: true });
+		execFileSync('zip', ['-qr', path.join(root, 'bun/bun-linux-x64.zip'), 'bun-linux-x64'], { cwd: stage });
+	}
 	if (deps) fs.mkdirSync(path.join(root, 'bun-install'), { recursive: true });
-	return { h, root };
+	const c = claudeSum ?? (claude !== undefined ? sha(path.join(root, 'claude/claude')) : 'f'.repeat(64));
+	fs.mkdirSync(path.join(pub, 'claude/2.1.305'), { recursive: true });
+	fs.writeFileSync(path.join(pub, 'claude/2.1.305/manifest.json'), JSON.stringify({ version: '2.1.305', platforms: { 'linux-x64-musl': { checksum: 'e'.repeat(64) }, 'linux-x64': { checksum: c, size: 1 }, 'darwin-arm64': { checksum: 'd'.repeat(64) } } }, null, 2));
+	const b = bunSum ?? (bun !== undefined ? sha(path.join(root, 'bun/bun-linux-x64.zip')) : 'f'.repeat(64));
+	fs.mkdirSync(path.join(pub, 'bun/bun-v1.3.14'), { recursive: true });
+	fs.writeFileSync(path.join(pub, 'bun/bun-v1.3.14/SHASUMS256.txt'), `${'a'.repeat(64)}  bun-linux-x64-baseline.zip\n${b}  bun-linux-x64.zip\n${'c'.repeat(64)}  bun-linux-x64-musl.zip\n`);
+	return { h, root, pub };
 }
-const verify = (h, env) => run(block('verify'), { HOME: h, CLAUDE_VERSION: '2.1.305', BUN_VERSION: '1.3.14', CLAUDE_HIT: '', BUN_HIT: '', DEPS_HIT: '', ...env });
+const verify = ({ h, pub }, env) =>
+	run(block('verify'), {
+		HOME: h,
+		CLAUDE_RELEASES: `file://${pub}/claude`,
+		BUN_RELEASES: `file://${pub}/bun`,
+		CLAUDE_VERSION: '2.1.305',
+		CLAUDE_PLATFORM: 'linux-x64',
+		BUN_VERSION: '1.3.14',
+		BUN_ZIP: 'bun-linux-x64.zip',
+		CLAUDE_HIT: '',
+		BUN_HIT: '',
+		DEPS_HIT: '',
+		...env,
+	});
+const HITS = { CLAUDE_HIT: 'true', BUN_HIT: 'true' };
 
-test('verify: hits whose binaries report the pinned versions are used, and the install cache is exported', () => {
-	const { h, root } = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14', deps: true });
-	const r = verify(h, { CLAUDE_HIT: 'true', BUN_HIT: 'true', DEPS_HIT: 'true' });
-	assert.equal(r.outputs['claude-path'], `${root}/claude/claude`);
-	assert.equal(r.outputs['bun-path'], `${root}/bun/bun`);
-	assert.equal(r.env, `BUN_INSTALL_CACHE_DIR=${root}/bun-install\n`);
+test('keys: the publishers\' platform names for this runner', () => {
+	const { outputs } = run(block('keys'), { REF, ACTION_DIR: actionDir() });
+	assert.equal(outputs['claude-platform'], 'linux-x64');
+	assert.equal(outputs['bun-zip'], 'bun-linux-x64.zip');
+	const arm = run(block('keys'), { REF, ACTION_DIR: actionDir(), RUNNER_ARCH: 'ARM64' }).outputs;
+	assert.equal(arm['claude-platform'], 'linux-arm64');
+	assert.equal(arm['bun-zip'], 'bun-linux-aarch64.zip');
+	assert.equal(run(block('keys'), { REF, ACTION_DIR: actionDir(), RUNNER_OS: 'macOS', RUNNER_ARCH: 'ARM64' }).outputs.ok, 'false');
 });
 
-for (const [name, claude, bun] of [
-	['another Claude version', '2.1.220 (Claude Code)', '1.3.14'],
-	['a Claude version with the pinned one as a prefix', '2.1.3050 (Claude Code)', '1.3.14'],
-	['another Bun version', '2.1.305 (Claude Code)', '1.3.13'],
-	['a binary that prints nothing', '', ''],
+test('verify: entries matching their published checksums and versions are used, and the install cache is exported', () => {
+	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14', deps: true });
+	const r = verify(f, { ...HITS, DEPS_HIT: 'true' });
+	assert.equal(r.outputs['claude-path'], `${f.root}/claude/claude`);
+	assert.equal(r.outputs['bun-path'], `${f.root}/bun/bin/bun`);
+	assert.equal(r.env, `BUN_INSTALL_CACHE_DIR=${f.root}/bun-install\n`);
+});
+
+for (const [name, opts, claudeOk, bunOk] of [
+	['a Claude binary that does not match its published checksum', { claudeSum: '0'.repeat(64) }, false, true],
+	['a Bun archive that does not match its published checksum', { bunSum: '0'.repeat(64) }, true, false],
+	['another Claude version, checksum matching', { claude: '2.1.220 (Claude Code)' }, false, true],
+	['a Claude version with the pinned one as a prefix', { claude: '2.1.3050 (Claude Code)' }, false, true],
+	['another Bun version, checksum matching', { bun: '1.3.13' }, true, false],
+	['binaries that print nothing', { claude: '', bun: '' }, false, false],
 ]) {
 	test(`verify falls back on ${name}: that path stays empty, with a warning`, () => {
-		const { h, root } = home({ claude, bun });
-		const r = verify(h, { CLAUDE_HIT: 'true', BUN_HIT: 'true' });
-		const claudeOk = claude.startsWith('2.1.305 ');
-		assert.equal(r.outputs['claude-path'], claudeOk ? `${root}/claude/claude` : undefined);
-		assert.equal(r.outputs['bun-path'], bun === '1.3.14' ? `${root}/bun/bun` : undefined);
+		const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14', ...opts });
+		const r = verify(f, HITS);
+		assert.equal(r.outputs['claude-path'], claudeOk ? `${f.root}/claude/claude` : undefined);
+		assert.equal(r.outputs['bun-path'], bunOk ? `${f.root}/bun/bin/bun` : undefined);
 		assert.match(r.stdout, /::warning title=Claude Code cache::.*installs it as usual/);
 	});
 }
 
-test('verify: a hit whose binary is missing or not executable falls back', () => {
-	const { h } = home();
-	const r = verify(h, { CLAUDE_HIT: 'true', BUN_HIT: 'true' });
-	assert.equal(r.outputs['claude-path'], undefined);
-	assert.equal(r.outputs['bun-path'], undefined);
+test('verify falls back when the published checksums cannot be read', () => {
+	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14' });
+	const r = verify(f, { ...HITS, CLAUDE_RELEASES: 'file:///nonexistent', BUN_RELEASES: 'file:///nonexistent' });
+	assert.deepEqual(r.outputs, {});
+	assert.match(r.stdout, /could not read Claude Code 2\.1\.305's published checksum/);
+	assert.match(r.stdout, /could not read Bun 1\.3\.14's published checksum/);
 });
 
-test('verify: misses use nothing and export nothing, even with binaries on disk', () => {
-	const { h } = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14', deps: true });
-	const r = verify(h, { CLAUDE_HIT: 'false', BUN_HIT: '' });
+test('verify reads the checksum of this platform, not a neighbour\'s', () => {
+	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14' });
+	const r = verify(f, { ...HITS, CLAUDE_PLATFORM: 'linux-x64-musl', BUN_ZIP: 'bun-linux-x64-musl.zip' });
+	assert.deepEqual(r.outputs, {});
+});
+
+test('verify: a hit whose files are missing falls back, with a warning', () => {
+	const f = home();
+	const r = verify(f, HITS);
+	assert.deepEqual(r.outputs, {});
+	assert.match(r.stdout, /::warning title=Claude Code cache::the cached Claude Code does not match/);
+	assert.match(r.stdout, /::warning title=Claude Code cache::the cached Bun does not match/);
+});
+
+test('keys: no RUNNER_WORKSPACE and no action-dir fails open', () => {
+	const { outputs } = run(block('keys'), { REF, ACTION_DIR: '' });
+	assert.equal(outputs.ok, 'false');
+	assert.equal(outputs['claude-key'], undefined);
+});
+
+test('keys: another Bun version is another dependency key', () => {
+	const a = run(block('keys'), { REF, ACTION_DIR: actionDir() }).outputs['deps-key'];
+	const b = run(block('keys'), { REF, ACTION_DIR: actionDir({ bun: '1.3.15' }) }).outputs['deps-key'];
+	assert.notEqual(a, b);
+});
+
+test('verify: misses use nothing and export nothing, even with verified files on disk', () => {
+	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14', deps: true });
+	const r = verify(f, { CLAUDE_HIT: 'false', BUN_HIT: '' });
 	assert.deepEqual(r.outputs, {});
 	assert.equal(r.env, '');
 });
