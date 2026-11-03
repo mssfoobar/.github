@@ -235,6 +235,8 @@ jobs:
         if: steps.auth.outputs.method != 'skip' && inputs.cache_role_arn != '' && inputs.cache_bucket != ''
         id: cache-aws
         continue-on-error: true
+        # A hung STS, S3 or extract must not eat the review's own timeout.
+        timeout-minutes: 5
         uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ inputs.cache_role_arn }}
@@ -248,6 +250,8 @@ jobs:
         if: steps.auth.outputs.method != 'skip' && steps.cache-aws.outcome == 'success'
         id: cc-cache
         continue-on-error: true
+        # A hung STS, S3 or extract must not eat the review's own timeout.
+        timeout-minutes: 5
         uses: mssfoobar/.github/.github/actions/claude-code-cache@5f979012aa007243da063dff66bbe03ed9b7a75d # #41
         with:
           # The SHA of the claude-code-action step below. Bump them together:

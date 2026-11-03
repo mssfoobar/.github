@@ -31,8 +31,11 @@ test('with the inputs empty, the cache steps never run, so the review gets the p
 	assert.match(run, /\n {10}path_to_bun_executable: \$\{\{ steps\.cc-cache\.outputs\.bun-path \}\}\n/);
 });
 
-test('neither cache step can fail the review', () => {
-	for (const n of ['Cache credentials', 'Restore Claude Code from the cache']) assert.match(step(n), /\n {8}continue-on-error: true\n/);
+test('neither cache step can fail the review, or stall it', () => {
+	for (const n of ['Cache credentials', 'Restore Claude Code from the cache']) {
+		assert.match(step(n), /\n {8}continue-on-error: true\n/);
+		assert.match(step(n), /\n {8}timeout-minutes: 5\n/);
+	}
 });
 
 test('the credentials never reach the job environment', () => {
