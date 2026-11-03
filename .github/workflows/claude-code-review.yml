@@ -248,7 +248,7 @@ jobs:
         if: steps.auth.outputs.method != 'skip' && steps.cache-aws.outcome == 'success'
         id: cc-cache
         continue-on-error: true
-        uses: mssfoobar/.github/.github/actions/claude-code-cache@7303c022588bfab376506f0513a447fb50f17a96 # #41
+        uses: mssfoobar/.github/.github/actions/claude-code-cache@5f979012aa007243da063dff66bbe03ed9b7a75d # #41
         with:
           # The SHA of the claude-code-action step below. Bump them together:
           # tests/claude-code-review-cache.test.mjs fails when they differ.
