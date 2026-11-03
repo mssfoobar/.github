@@ -185,12 +185,14 @@ runs:
         path: ${{ steps.keys.outputs.deps-dir }}
         key: ${{ steps.keys.outputs.deps-key }}
 
-    # A restored executable is used only if it matches the checksum its
-    # publisher lists for that version and platform — Claude Code's release
-    # manifest (2 KB), Bun's SHASUMS256.txt — and then reports that version. So
-    # an entry is trusted for what it is, not for who could write it. The
-    # dependency cache has no published checksum: it relies on the bucket's
-    # write isolation (only the protected-branch writer's role may write it).
+    # A restored executable is used, or even run, only once it matches the
+    # checksum its publisher lists for that version and platform — Claude
+    # Code's release manifest (2 KB), Bun's SHASUMS256.txt — and then reports
+    # that version. That catches a wrong, corrupt or swapped binary. It is not
+    # the trust boundary: runs-on/cache extracts an entry's archive before this
+    # step, and an archive can write outside its directory, so every entry, the
+    # dependency cache included, rests on the bucket's write isolation (only
+    # the protected-branch writer's role may write it).
     - id: verify
       if: inputs.restore == 'true' && steps.keys.outputs.ok == 'true'
       continue-on-error: true
@@ -208,20 +210,22 @@ runs:
         # ---- verify
         set -uo pipefail
         root="$HOME/.cache/claude-code-cache"
-        claude_base=${CLAUDE_RELEASES:-https://downloads.claude.ai/claude-code-releases}
-        bun_base=${BUN_RELEASES:-https://github.com/oven-sh/bun/releases/download}
+        # Fixed, never read from the environment: an earlier step could set one.
+        claude_base=https://downloads.claude.ai/claude-code-releases
+        bun_base=https://github.com/oven-sh/bun/releases/download
         note() { echo "::warning title=Claude Code cache::$1; the action installs it as usual"; }
         if [ "$CLAUDE_HIT" = true ]; then
           bin="$root/claude/claude"
-          want=$(curl -fsSL --max-time 20 "$claude_base/$CLAUDE_VERSION/manifest.json" 2>/dev/null | tr -d '\n' |
+          want=$(curl -fsSL --proto =https --max-time 20 "$claude_base/$CLAUDE_VERSION/manifest.json" 2>/dev/null | tr -d '\n' |
             sed -n "s/.*\"$CLAUDE_PLATFORM\"[[:space:]]*:[[:space:]]*{[^{}]*\"checksum\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]\{64\}\)\".*/\1/p")
           got=$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)
-          ver=$(timeout 30 "$bin" --version 2>/dev/null | head -1)
+          # Nothing restored runs before its checksum matches: it would run
+          # with this step's GITHUB_OUTPUT and GITHUB_ENV.
           if [ -z "$want" ]; then
             note "could not read Claude Code $CLAUDE_VERSION's published checksum"
           elif [ "$got" != "$want" ]; then
             note "the cached Claude Code does not match its published checksum"
-          elif [[ "$ver" != "$CLAUDE_VERSION "* && "$ver" != "$CLAUDE_VERSION" ]]; then
+          elif ver=$(timeout 30 "$bin" --version 2>/dev/null | head -1); [[ "$ver" != "$CLAUDE_VERSION "* && "$ver" != "$CLAUDE_VERSION" ]]; then
             note "the cached Claude Code reports '${ver:-nothing}', not $CLAUDE_VERSION"
           else
             echo "claude-path=$bin" >> "$GITHUB_OUTPUT"
@@ -232,7 +236,7 @@ runs:
         fi
         if [ "$BUN_HIT" = true ]; then
           zip=$BUN_ZIP
-          want=$(curl -fsSL --max-time 20 "$bun_base/bun-v$BUN_VERSION/SHASUMS256.txt" 2>/dev/null | awk -v f="$zip" '$2 == f { print $1 }')
+          want=$(curl -fsSL --proto =https --max-time 20 "$bun_base/bun-v$BUN_VERSION/SHASUMS256.txt" 2>/dev/null | awk -v f="$zip" '$2 == f { print $1 }')
           got=$(sha256sum "$root/bun/$zip" 2>/dev/null | cut -d' ' -f1)
           if [ -z "$want" ]; then
             note "could not read Bun $BUN_VERSION's published checksum"

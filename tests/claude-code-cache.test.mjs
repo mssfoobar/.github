@@ -117,11 +117,17 @@ function home({ claude, bun, deps = false, claudeSum, bunSum } = {}) {
 	fs.writeFileSync(path.join(pub, 'bun/bun-v1.3.14/SHASUMS256.txt'), `${'a'.repeat(64)}  bun-linux-x64-baseline.zip\n${b}  bun-linux-x64.zip\n${'c'.repeat(64)}  bun-linux-x64-musl.zip\n`);
 	return { h, root, pub };
 }
-const verify = ({ h, pub }, env) =>
-	run(block('verify'), {
+// The action pins its publishers' URLs, https only; the test points its own
+// copy of the script at the fake publisher, and checks nothing else differs.
+const PUBLISHERS = ['https://downloads.claude.ai/claude-code-releases', 'https://github.com/oven-sh/bun/releases/download'];
+function verifyAt(pub, claude = `file://${pub}/claude`, bun = `file://${pub}/bun`) {
+	const b = block('verify');
+	for (const u of PUBLISHERS) assert.equal(b.split(u).length, 2, `${u} appears once`);
+	return b.replace(PUBLISHERS[0], claude).replace(PUBLISHERS[1], bun).replaceAll('--proto =https ', '');
+}
+const verify = ({ h, pub }, env, script = verifyAt(pub)) =>
+	run(script, {
 		HOME: h,
-		CLAUDE_RELEASES: `file://${pub}/claude`,
-		BUN_RELEASES: `file://${pub}/bun`,
 		CLAUDE_VERSION: '2.1.305',
 		CLAUDE_PLATFORM: 'linux-x64',
 		BUN_VERSION: '1.3.14',
@@ -132,6 +138,12 @@ const verify = ({ h, pub }, env) =>
 		...env,
 	});
 const HITS = { CLAUDE_HIT: 'true', BUN_HIT: 'true' };
+// A curl that fails every request, so the real script runs offline.
+function fakeCurl() {
+	const d = tmp();
+	fs.writeFileSync(path.join(d, 'curl'), '#!/bin/sh\nexit 6\n', { mode: 0o755 });
+	return d;
+}
 
 test('keys: the publishers\' platform names for this runner', () => {
 	const { outputs } = run(block('keys'), { REF, ACTION_DIR: actionDir() });
@@ -168,9 +180,29 @@ for (const [name, opts, claudeOk, bunOk] of [
 	});
 }
 
+for (const [name, opts] of [
+	['does not match its checksum', { claudeSum: '0'.repeat(64), bunSum: '0'.repeat(64) }],
+	['has no readable checksum', { unreadable: true }],
+]) {
+	test(`verify never runs a restored binary that ${name}`, () => {
+		const f = home({ ...opts });
+		const marker = path.join(f.h, 'ran');
+		// A planted binary that, if run, writes the job's outputs and environment.
+		for (const p of [path.join(f.root, 'claude/claude')]) {
+			fs.mkdirSync(path.dirname(p), { recursive: true });
+			fs.writeFileSync(p, `#!/bin/sh\ntouch '${marker}'\necho "claude-path=/tmp/evil" >> "$GITHUB_OUTPUT"\necho "NODE_OPTIONS=--require /tmp/evil.js" >> "$GITHUB_ENV"\necho '2.1.305 (Claude Code)'\n`, { mode: 0o755 });
+		}
+		const script = opts.unreadable ? verifyAt(f.pub, 'file:///nonexistent', 'file:///nonexistent') : verifyAt(f.pub);
+		const r = verify(f, { CLAUDE_HIT: 'true', BUN_HIT: '' }, script);
+		assert.equal(fs.existsSync(marker), false, 'the planted binary ran');
+		assert.deepEqual(r.outputs, {});
+		assert.equal(r.env, '');
+	});
+}
+
 test('verify falls back when the published checksums cannot be read', () => {
 	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14' });
-	const r = verify(f, { ...HITS, CLAUDE_RELEASES: 'file:///nonexistent', BUN_RELEASES: 'file:///nonexistent' });
+	const r = verify(f, HITS, verifyAt(f.pub, 'file:///nonexistent', 'file:///nonexistent'));
 	assert.deepEqual(r.outputs, {});
 	assert.match(r.stdout, /could not read Claude Code 2\.1\.305's published checksum/);
 	assert.match(r.stdout, /could not read Bun 1\.3\.14's published checksum/);
@@ -226,6 +258,21 @@ test('each restore takes an exact key, step-scoped credentials and the bucket, a
 		for (const k of ['RUNS_ON_S3_BUCKET_CACHE: ${{ inputs.bucket }}', 'AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}', 'AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}', 'AWS_SESSION_TOKEN: ${{ inputs.aws-session-token }}']) assert.ok(s.includes(k), `missing ${k}`);
 	}
 });
+test('the publishers are fixed https URLs, never read from the environment', () => {
+	const b = block('verify');
+	for (const u of PUBLISHERS) assert.ok(b.includes(`=${u}\n`), `${u} is assigned literally`);
+	assert.doesNotMatch(b, /\$\{[A-Z_]*RELEASES/);
+	assert.equal((b.match(/curl /g) ?? []).length, (b.match(/curl -fsSL --proto =https /g) ?? []).length, 'every curl is https only');
+});
+
+test('an environment override cannot redirect the checksum source', () => {
+	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14', claudeSum: '0'.repeat(64), bunSum: '0'.repeat(64) });
+	// The real script, a poisoned job environment, and no network: the fake
+	// publisher would vouch for anything, but the script never asks it.
+	const r = verify(f, { ...HITS, CLAUDE_RELEASES: `file://${f.pub}/claude`, BUN_RELEASES: `file://${f.pub}/bun`, PATH: `${fakeCurl()}:${process.env.PATH}` }, block('verify'));
+	assert.deepEqual(r.outputs, {});
+});
+
 test('no step of the action can fail the job', () => {
 	assert.equal(steps.length, 5);
 	for (const s of steps) assert.match(s, /\n {6}continue-on-error: true\n/, s.split('\n')[0]);

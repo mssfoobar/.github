@@ -417,10 +417,12 @@ for the action's own dependencies (about 0.5 GiB a run, measured on x64). The
 versions are read from the action's checkout at the SHA you pass, and every
 key is exact.
 
-- A restored Claude Code binary is used only if it matches the checksum in
-  Claude Code's release manifest for that version and platform, and reports
-  that version. The Bun entry is the release zip, checked against Bun's
-  `SHASUMS256.txt`.
+- A restored Claude Code binary is used, or even run, only once it matches
+  the checksum in Claude Code's release manifest for that version and
+  platform, and then reports that version. The Bun entry is the release zip,
+  checked against Bun's `SHASUMS256.txt`. This catches a wrong or corrupt
+  binary; the trust model still rests on the bucket's write isolation, since
+  an entry's archive is extracted before any check.
 - Any miss, mismatch, unreadable checksum or missing credential leaves
   `claude-path` and `bun-path` empty, so the action installs as usual. No step
   can fail the job.
