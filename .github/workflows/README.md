@@ -409,6 +409,24 @@ Inputs: `runner`, `model`, `max_turns` (default 80), `timeout_minutes`
 (default 40), `review_instructions`, `allow_oauth_fallback`, `allowed_bots`,
 `report_failure` (default `true`).
 
+**Optional download cache.** Set `cache_role_arn` and `cache_bucket` to
+restore Claude Code, Bun and the action's dependencies from an S3 cache
+through `.github/actions/claude-code-cache` (below), instead of downloading
+about 0.5 GiB a run. Leave them empty, the default, and nothing changes. The
+role must only read: the review runs on PR content, and the entries are
+written by a separate job in your repository that runs no PR code.
+
+- The role's trust policy matches the *calling* repository's OIDC subject
+  (`repo:<org>/<repo>:pull_request`), not this repository's.
+- Each cache step has a 5-minute timeout, and neither can fail the review.
+  The two executables are checked against their publishers' checksums. The
+  dependency cache is not checked: a bad entry from your writer can fail the
+  action's `bun install`.
+- With the inputs empty the steps are skipped, but the runner still
+  downloads `aws-actions/configure-aws-credentials` and this repository's
+  `claude-code-cache` action (with `runs-on/cache`) at job setup, so a caller
+  whose Actions allow-list lacks them fails there.
+
 #### `.github/actions/claude-code-cache` (composite action)
 
 Keys for, and a read-only restore of, what `anthropics/claude-code-action`

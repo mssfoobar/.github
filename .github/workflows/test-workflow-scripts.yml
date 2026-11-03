@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/npm-snapshot-publish.yml'
+      - '.github/workflows/claude-code-review.yml'
       - '.github/actions/**'
       - '.github/workflows/test-workflow-scripts.yml'
       - 'tests/**'
