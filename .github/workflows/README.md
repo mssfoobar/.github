@@ -409,6 +409,13 @@ Inputs: `runner`, `model`, `max_turns` (default 80), `timeout_minutes`
 (default 40), `review_instructions`, `allow_oauth_fallback`, `allowed_bots`,
 `report_failure` (default `true`).
 
+**Optional download cache.** Set `cache_role_arn` and `cache_bucket` to
+restore Claude Code, Bun and the action's dependencies from an S3 cache
+through `.github/actions/claude-code-cache` (below), instead of downloading
+about 0.5 GiB a run. Leave them empty, the default, and nothing changes. The
+role must only read: the review runs on PR content, and the entries are
+written by a separate job in your repository that runs no PR code.
+
 #### `.github/actions/claude-code-cache` (composite action)
 
 Keys for, and a read-only restore of, what `anthropics/claude-code-action`
