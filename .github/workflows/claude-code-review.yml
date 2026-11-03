@@ -115,6 +115,21 @@ on:
         type: boolean
         default: true
         description: 'Post a PR comment (marker `<!-- claude-code-review:failed -->`) when the review fails or times out, instead of leaving only a red check. Set false if the caller reports failures itself.'
+      cache_role_arn:
+        required: false
+        type: string
+        default: ''
+        description: 'An AWS role this job may assume through OIDC that can only READ an S3 cache (GetObject and ListBucket on cache/<repo>/). With `cache_bucket`, the review restores Claude Code, Bun and the action''s dependencies from that cache through .github/actions/claude-code-cache instead of downloading them (about 0.5 GiB a run). Empty, the default, changes nothing. The entries are written by a separate job in the calling repo that runs no PR code; see that action''s README section. Never give this a role that can write: the review runs on PR content.'
+      cache_bucket:
+        required: false
+        type: string
+        default: ''
+        description: 'The S3 bucket for `cache_role_arn`. Both must be set for the cache to be used.'
+      cache_region:
+        required: false
+        type: string
+        default: 'ap-southeast-1'
+        description: 'The region of `cache_bucket`.'
     # Declared explicitly so callers can pass exactly these two rather than
     # `secrets: inherit`, which hands a reusable workflow EVERY secret in the
     # repo — registry tokens, signing keys, cloud credentials — when it needs
@@ -209,11 +224,50 @@ jobs:
           # self-hosted runners.
           fetch-depth: 1
 
+      # Opt-in cache for what the action downloads (ops-hub AOH-10251). Both
+      # steps run only when the caller set cache_role_arn AND cache_bucket, and
+      # both fail open: no credentials, a miss or a failed check leaves the
+      # paths below empty, which is those inputs' default, so the action
+      # installs exactly as it does without the cache. The credentials come
+      # back as step outputs only (output-env-credentials: false), so nothing
+      # later in the job, the review included, holds them.
+      - name: Cache credentials
+        if: steps.auth.outputs.method != 'skip' && inputs.cache_role_arn != '' && inputs.cache_bucket != ''
+        id: cache-aws
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ inputs.cache_role_arn }}
+          aws-region: ${{ inputs.cache_region }}
+          role-session-name: claude-code-review-cache
+          output-credentials: true
+          output-env-credentials: false
+          retry-max-attempts: 2
+
+      - name: Restore Claude Code from the cache
+        if: steps.auth.outputs.method != 'skip' && steps.cache-aws.outcome == 'success'
+        id: cc-cache
+        continue-on-error: true
+        uses: mssfoobar/.github/.github/actions/claude-code-cache@7303c022588bfab376506f0513a447fb50f17a96 # #41
+        with:
+          # The SHA of the claude-code-action step below. Bump them together:
+          # tests/claude-code-review-cache.test.mjs fails when they differ.
+          action-ref: be7b93b1907a4abad570368f3c74b6fe3807510b
+          bucket: ${{ inputs.cache_bucket }}
+          aws-region: ${{ inputs.cache_region }}
+          aws-access-key-id: ${{ steps.cache-aws.outputs.aws-access-key-id }}
+          aws-secret-access-key: ${{ steps.cache-aws.outputs.aws-secret-access-key }}
+          aws-session-token: ${{ steps.cache-aws.outputs.aws-session-token }}
+
       - name: Run Claude Code Review
         if: steps.auth.outputs.method != 'skip'
         id: claude-review
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
+          # Empty, the inputs' default, unless the cache step above verified a
+          # restored binary.
+          path_to_claude_code_executable: ${{ steps.cc-cache.outputs.claude-path }}
+          path_to_bun_executable: ${{ steps.cc-cache.outputs.bun-path }}
           anthropic_api_key: ${{ steps.auth.outputs.method == 'api_key' && secrets.ANTHROPIC_API_KEY || '' }}
           claude_code_oauth_token: ${{ steps.auth.outputs.method == 'oauth' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           # INERT here, kept in case upstream changes: sticky comments apply to
