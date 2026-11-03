@@ -1,5 +1,6 @@
 // Tests .github/actions/claude-code-cache: the key derivation and the version
-// check, run as bash exactly as the action runs them (read out of the YAML
+// check, run as bash exactly as the action runs them (with the runner's
+// `bash --noprofile --norc -eo pipefail`) (read out of the YAML
 // between the `# ---- keys` / `# ---- verify` markers), against fixtures.
 //
 // Run with: node --test tests/*.test.mjs
@@ -28,7 +29,8 @@ function run(script, env) {
 	const genv = path.join(dir, 'env');
 	fs.writeFileSync(out, '');
 	fs.writeFileSync(genv, '');
-	const stdout = execFileSync('bash', ['-c', script], { env: { PATH: process.env.PATH, HOME: process.env.HOME, GITHUB_OUTPUT: out, GITHUB_ENV: genv, RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', ...env }, encoding: 'utf8' });
+	// The flags GitHub runs a `shell: bash` step with, composite steps included.
+	const stdout = execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], { env: { PATH: process.env.PATH, HOME: process.env.HOME, GITHUB_OUTPUT: out, GITHUB_ENV: genv, RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', ...env }, encoding: 'utf8' });
 	const outputs = Object.fromEntries(fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 	return { stdout, outputs, env: fs.readFileSync(genv, 'utf8') };
 }
@@ -115,7 +117,14 @@ function home({ claude, bun, deps = false, claudeSum, bunSum } = {}) {
 	const b = bunSum ?? (bun !== undefined ? sha(path.join(root, 'bun/bun-linux-x64.zip')) : 'f'.repeat(64));
 	fs.mkdirSync(path.join(pub, 'bun/bun-v1.3.14'), { recursive: true });
 	fs.writeFileSync(path.join(pub, 'bun/bun-v1.3.14/SHASUMS256.txt'), `${'a'.repeat(64)}  bun-linux-x64-baseline.zip\n${b}  bun-linux-x64.zip\n${'c'.repeat(64)}  bun-linux-x64-musl.zip\n`);
-	return { h, root, pub };
+	return { h, root, pub, rt: tmp() };
+}
+// A handed-over path is a copy, alone in a fresh directory under RUNNER_TEMP.
+function handedOver(f, p, name) {
+	assert.ok(p, `no ${name} path`);
+	assert.ok(p.startsWith(`${f.rt}/claude-code-cache.`), `${p} is not under RUNNER_TEMP`);
+	assert.ok(!p.startsWith(f.root), `${p} is inside the restored cache`);
+	assert.deepEqual(fs.readdirSync(path.dirname(p)), [name], `${name} is not alone in its directory`);
 }
 // The action pins its publishers' URLs, https only; the test points its own
 // copy of the script at the fake publisher, and checks nothing else differs.
@@ -125,9 +134,10 @@ function verifyAt(pub, claude = `file://${pub}/claude`, bun = `file://${pub}/bun
 	for (const u of PUBLISHERS) assert.equal(b.split(u).length, 2, `${u} appears once`);
 	return b.replace(PUBLISHERS[0], claude).replace(PUBLISHERS[1], bun).replaceAll('--proto =https ', '');
 }
-const verify = ({ h, pub }, env, script = verifyAt(pub)) =>
+const verify = ({ h, pub, rt }, env, script = verifyAt(pub)) =>
 	run(script, {
 		HOME: h,
+		RUNNER_TEMP: rt,
 		CLAUDE_VERSION: '2.1.305',
 		CLAUDE_PLATFORM: 'linux-x64',
 		BUN_VERSION: '1.3.14',
@@ -158,9 +168,19 @@ test('keys: the publishers\' platform names for this runner', () => {
 test('verify: entries matching their published checksums and versions are used, and the install cache is exported', () => {
 	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14', deps: true });
 	const r = verify(f, { ...HITS, DEPS_HIT: 'true' });
-	assert.equal(r.outputs['claude-path'], `${f.root}/claude/claude`);
-	assert.equal(r.outputs['bun-path'], `${f.root}/bun/bin/bun`);
+	handedOver(f, r.outputs['claude-path'], 'claude');
+	handedOver(f, r.outputs['bun-path'], 'bun');
+	assert.notEqual(path.dirname(r.outputs['claude-path']), path.dirname(r.outputs['bun-path']));
 	assert.equal(r.env, `BUN_INSTALL_CACHE_DIR=${f.root}/bun-install\n`);
+});
+
+test('verify: other files restored beside an executable are never handed over with it', () => {
+	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14' });
+	fakeExe(path.join(f.root, 'claude/git'), 'planted');
+	fakeExe(path.join(f.root, 'bun/bin/node'), 'planted');
+	const r = verify(f, HITS);
+	handedOver(f, r.outputs['claude-path'], 'claude');
+	handedOver(f, r.outputs['bun-path'], 'bun');
 });
 
 for (const [name, opts, claudeOk, bunOk] of [
@@ -174,8 +194,10 @@ for (const [name, opts, claudeOk, bunOk] of [
 	test(`verify falls back on ${name}: that path stays empty, with a warning`, () => {
 		const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14', ...opts });
 		const r = verify(f, HITS);
-		assert.equal(r.outputs['claude-path'], claudeOk ? `${f.root}/claude/claude` : undefined);
-		assert.equal(r.outputs['bun-path'], bunOk ? `${f.root}/bun/bin/bun` : undefined);
+		if (claudeOk) handedOver(f, r.outputs['claude-path'], 'claude');
+		else assert.equal(r.outputs['claude-path'], undefined);
+		if (bunOk) handedOver(f, r.outputs['bun-path'], 'bun');
+		else assert.equal(r.outputs['bun-path'], undefined);
 		assert.match(r.stdout, /::warning title=Claude Code cache::.*installs it as usual/);
 	});
 }
@@ -202,7 +224,9 @@ for (const [name, opts] of [
 
 test('verify falls back when the published checksums cannot be read', () => {
 	const f = home({ claude: '2.1.305 (Claude Code)', bun: '1.3.14' });
-	const r = verify(f, HITS, verifyAt(f.pub, 'file:///nonexistent', 'file:///nonexistent'));
+	const r = verify(f, { ...HITS, DEPS_HIT: 'true' }, verifyAt(f.pub, 'file:///nonexistent', 'file:///nonexistent'));
+	// One failed lookup does not stop the next entry: the install cache is still exported.
+	assert.equal(r.env, `BUN_INSTALL_CACHE_DIR=${f.root}/bun-install\n`);
 	assert.deepEqual(r.outputs, {});
 	assert.match(r.stdout, /could not read Claude Code 2\.1\.305's published checksum/);
 	assert.match(r.stdout, /could not read Bun 1\.3\.14's published checksum/);

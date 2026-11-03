@@ -103,7 +103,8 @@ runs:
         ACTION_DIR: ${{ inputs.action-dir }}
       run: |
         # ---- keys
-        set -uo pipefail
+        # The runner starts this with -e; a failed lookup must warn, not abort.
+        set +e -uo pipefail
         fail() { echo "::warning title=Claude Code cache::$1; the action installs as usual"; echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0; }
         [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || fail "action-ref is not a 40-hex commit SHA"
         [ -n "$ACTION_DIR" ] || [ -n "${RUNNER_WORKSPACE:-}" ] || fail "no action-dir, and no RUNNER_WORKSPACE to find the runner's copy"
@@ -208,14 +209,22 @@ runs:
         DISABLE_AUTOUPDATER: '1'
       run: |
         # ---- verify
-        set -uo pipefail
+        # The runner starts this with -e; a failed lookup must warn and move on
+        # to the next entry, not abort.
+        set +e -uo pipefail
         root="$HOME/.cache/claude-code-cache"
         # Fixed, never read from the environment: an earlier step could set one.
         claude_base=https://downloads.claude.ai/claude-code-releases
         bun_base=https://github.com/oven-sh/bun/releases/download
         note() { echo "::warning title=Claude Code cache::$1; the action installs it as usual"; }
+        # Each executable is checked, run and handed over as a COPY in a fresh
+        # directory: the action puts the path's directory on PATH, so nothing
+        # else restored beside it may be there, and the file checked is the
+        # file used.
+        fresh() { mktemp -d "${RUNNER_TEMP:-/tmp}/claude-code-cache.XXXXXX"; }
         if [ "$CLAUDE_HIT" = true ]; then
-          bin="$root/claude/claude"
+          bin="$(fresh)/claude"
+          cp "$root/claude/claude" "$bin" 2>/dev/null && chmod 0755 "$bin"
           want=$(curl -fsSL --proto =https --max-time 20 "$claude_base/$CLAUDE_VERSION/manifest.json" 2>/dev/null | tr -d '\n' |
             sed -n "s/.*\"$CLAUDE_PLATFORM\"[[:space:]]*:[[:space:]]*{[^{}]*\"checksum\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]\{64\}\)\".*/\1/p")
           got=$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1)
@@ -235,19 +244,21 @@ runs:
           echo "Claude Code cache: no entry for $CLAUDE_VERSION"
         fi
         if [ "$BUN_HIT" = true ]; then
-          zip=$BUN_ZIP
-          want=$(curl -fsSL --proto =https --max-time 20 "$bun_base/bun-v$BUN_VERSION/SHASUMS256.txt" 2>/dev/null | awk -v f="$zip" '$2 == f { print $1 }')
-          got=$(sha256sum "$root/bun/$zip" 2>/dev/null | cut -d' ' -f1)
+          dir=$(fresh)
+          zip="$dir/$BUN_ZIP"
+          cp "$root/bun/$BUN_ZIP" "$zip" 2>/dev/null
+          want=$(curl -fsSL --proto =https --max-time 20 "$bun_base/bun-v$BUN_VERSION/SHASUMS256.txt" 2>/dev/null | awk -v f="$BUN_ZIP" '$2 == f { print $1 }')
+          got=$(sha256sum "$zip" 2>/dev/null | cut -d' ' -f1)
           if [ -z "$want" ]; then
             note "could not read Bun $BUN_VERSION's published checksum"
           elif [ "$got" != "$want" ]; then
             note "the cached Bun does not match its published checksum"
-          elif ! unzip -qoj "$root/bun/$zip" '*/bun' -d "$root/bun/bin" 2>/dev/null; then
+          elif ! unzip -qoj "$zip" '*/bun' -d "$dir/bin" 2>/dev/null; then
             note "the cached Bun archive would not extract"
-          elif [ "$(timeout 30 "$root/bun/bin/bun" --version 2>/dev/null)" != "$BUN_VERSION" ]; then
+          elif [ "$(timeout 30 "$dir/bin/bun" --version 2>/dev/null)" != "$BUN_VERSION" ]; then
             note "the cached Bun does not report $BUN_VERSION"
           else
-            echo "bun-path=$root/bun/bin/bun" >> "$GITHUB_OUTPUT"
+            echo "bun-path=$dir/bin/bun" >> "$GITHUB_OUTPUT"
             echo "Bun cache: $BUN_VERSION restored and verified"
           fi
         else
