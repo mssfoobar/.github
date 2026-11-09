@@ -18,6 +18,7 @@ AGIL Ops Hub is a comprehensive development platform for command and control sys
     ├── golang-docker-build-push.yml
     ├── npm-build-publish.yml
     ├── modlet-build-publish.yml
+    ├── android-gradle-build.yml
     ├── update-deployment.yml
     ├── sonarqube-scan.yml
     ├── golang-sonarqube-scan.yml
@@ -44,6 +45,7 @@ profile/
 - `golang-docker-build-push.yml`: Go microservices
 - `npm-build-publish.yml`: NPM packages
 - `modlet-build-publish.yml`: AGIL Ops Hub modlets (pluggable UI components)
+- `android-gradle-build.yml`: Android apps and libraries (Gradle tasks + artifact upload)
 
 **Deployment Workflows**:
 - `update-deployment.yml`: Updates Kubernetes manifests or Helm values in the deployment repository
@@ -129,6 +131,9 @@ Updates deployment manifests in a separate repository. Supports both traditional
 
 ### modlet-build-publish.yml
 Specialized workflow for AGIL Ops Hub modlets - uses custom CLI tool to pack and publish modular UI components as NPM packages.
+
+### android-gradle-build.yml
+Runs Gradle tasks on an Android project — the caller's or, with `APP_ID`/`APP_PRIVATE_KEY`, another repository in the org — and uploads the result. Exports secrets the caller names (`env_secrets`, `decode_files`) from the job's `environment`, so callers pass them by name, never `secrets: inherit`. Caches Gradle (`setup-gradle`) and the Android SDK packages AGP downloads (`actions/cache`); both caches belong to the caller's repository.
 
 ### claude.yml
 Interactive Claude Code workflow that responds to @claude mentions in:

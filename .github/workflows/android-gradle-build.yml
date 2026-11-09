@@ -1,0 +1,177 @@
+name: Android Gradle Build
+
+on:
+    workflow_call:
+        inputs:
+            org_name:
+                required: true
+                type: string
+                description: "GitHub organization that owns the repository to build"
+            repository:
+                required: false
+                type: string
+                default: ""
+                description: "Optional. Repository name (no owner) to build instead of the caller's, e.g. 'field-manager'. Needs APP_ID and APP_PRIVATE_KEY."
+            ref:
+                required: false
+                type: string
+                default: ""
+                description: "Optional. Branch, tag or SHA to build. Defaults to the triggering ref (caller) or the default branch (other repository)."
+            working_directory:
+                required: false
+                type: string
+                default: "."
+                description: "Directory holding the Gradle wrapper, relative to the repository root"
+            gradle_tasks:
+                required: true
+                type: string
+                description: "Space-separated Gradle tasks, e.g. ':app:assembleDevDebug'"
+            environment:
+                required: false
+                type: string
+                default: ""
+                description: "Optional. Caller's GitHub Environment to read secrets from (e.g. 'dev')"
+            env_secrets:
+                required: false
+                type: string
+                default: ""
+                description: "Optional. Space-separated secret names exported as environment variables of the same name for Gradle"
+            decode_files:
+                required: false
+                type: string
+                default: ""
+                description: "Optional. Lines of SECRET_NAME=path: each base64 secret is decoded to that path, relative to working_directory"
+            artifact_name:
+                required: false
+                type: string
+                default: ""
+                description: "Optional. Name of the artifact to upload. Nothing is uploaded when empty."
+            artifact_path:
+                required: false
+                type: string
+                default: ""
+                description: "Paths (one per line, relative to the repository root) to upload as the artifact"
+            retention_days:
+                required: false
+                type: number
+                default: 7
+                description: "Days to keep the artifact. Artifacts count toward the org's paid storage; caches do not."
+            cache_write_all_branches:
+                required: false
+                type: boolean
+                default: false
+                description: "Save the Gradle cache from every branch, not only the default one. A branch reads its own cache and the default branch's."
+            java_version:
+                required: false
+                type: string
+                default: "21"
+                description: "Temurin JDK that runs Gradle"
+            runner:
+                required: false
+                type: string
+                default: "ubuntu-latest"
+                description: 'Runner label to execute on. Defaults to GitHub-hosted ubuntu-latest; set to a self-hosted scale-set label (e.g. "arc-runner") to run on self-hosted runners.'
+
+        secrets:
+            APP_ID:
+                required: false
+                description: "GitHub App ID, to check out another repository"
+            APP_PRIVATE_KEY:
+                required: false
+                description: "GitHub App private key, to check out another repository"
+
+        outputs:
+            commit:
+                description: "The commit SHA that was built"
+                value: ${{ jobs.build.outputs.commit }}
+
+jobs:
+    build:
+        name: Gradle ${{ inputs.gradle_tasks }}
+        runs-on: ${{ inputs.runner }}
+        environment: ${{ inputs.environment }}
+        outputs:
+            commit: ${{ steps.checkout.outputs.commit }}
+        env:
+            USE_APP_TOKEN: ${{ inputs.repository != '' }}
+        steps:
+            - name: Generate GitHub App Token
+              if: env.USE_APP_TOKEN == 'true'
+              uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+              id: app-token
+              with:
+                  app-id: ${{ secrets.APP_ID }}
+                  private-key: ${{ secrets.APP_PRIVATE_KEY }}
+                  owner: ${{ inputs.org_name }}
+                  repositories: ${{ inputs.repository }}
+
+            - name: Check out repository
+              id: checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  repository: ${{ inputs.repository != '' && format('{0}/{1}', inputs.org_name, inputs.repository) || github.repository }}
+                  ref: ${{ inputs.ref }}
+                  token: ${{ steps.app-token.outputs.token || github.token }}
+
+            - name: Set up JDK
+              uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+              with:
+                  distribution: temurin
+                  java-version: ${{ inputs.java_version }}
+
+            - name: Set up Android SDK
+              uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+            # The Gradle cache doesn't cover the Android SDK: the platforms and
+            # build-tools AGP downloads on first use (compileSdk decides which).
+            # A build-file change makes a new key, but restore-keys still starts
+            # it from the previous cache, so only the new package is downloaded.
+            - name: Cache Android SDK packages
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: |
+                      ${{ env.ANDROID_HOME }}/platforms
+                      ${{ env.ANDROID_HOME }}/build-tools
+                  key: android-sdk-${{ runner.os }}-${{ hashFiles(format('{0}/**/*.gradle.kts', inputs.working_directory), format('{0}/gradle/libs.versions.toml', inputs.working_directory)) }}
+                  restore-keys: android-sdk-${{ runner.os }}-
+
+            - name: Set up Gradle
+              uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+              with:
+                  cache-read-only: ${{ !inputs.cache_write_all_branches && github.ref_name != github.event.repository.default_branch }}
+
+            # Looks secrets up by name, so callers choose which ones Gradle sees.
+            - name: Export secrets
+              if: inputs.env_secrets != '' || inputs.decode_files != ''
+              working-directory: ${{ inputs.working_directory }}
+              env:
+                  SECRETS_JSON: ${{ toJSON(secrets) }}
+                  ENV_SECRETS: ${{ inputs.env_secrets }}
+                  DECODE_FILES: ${{ inputs.decode_files }}
+              run: |
+                  set -euo pipefail
+                  secret() { jq -er --arg k "$1" '.[$k] // empty' <<<"$SECRETS_JSON" || { echo "::error::Secret '$1' is not set"; exit 1; }; }
+                  for name in $ENV_SECRETS; do
+                      delimiter="EOF_$(openssl rand -hex 8)"
+                      { echo "$name<<$delimiter"; secret "$name"; echo "$delimiter"; } >> "$GITHUB_ENV"
+                  done
+                  while IFS='=' read -r name path; do
+                      [ -z "$name" ] && continue
+                      mkdir -p "$(dirname "$path")"
+                      secret "$name" | base64 -d > "$path"
+                  done <<<"$DECODE_FILES"
+
+            - name: Run Gradle
+              working-directory: ${{ inputs.working_directory }}
+              env:
+                  GRADLE_TASKS: ${{ inputs.gradle_tasks }}
+              run: ./gradlew $GRADLE_TASKS
+
+            - name: Upload artifact
+              if: inputs.artifact_name != ''
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: ${{ inputs.artifact_name }}
+                  path: ${{ inputs.artifact_path }}
+                  if-no-files-found: error
+                  retention-days: ${{ inputs.retention_days }}
