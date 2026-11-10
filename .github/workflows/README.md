@@ -142,8 +142,10 @@ repository (for example `field-manager`'s AGIL Talk SDK).
 | `APP_ID`          | GitHub App ID, to check out another repository        | When `repository` is set |
 | `APP_PRIVATE_KEY` | GitHub App private key, to check out another repository | When `repository` is set |
 
-Secrets named in `env_secrets` and `decode_files` are read from the job's `environment`; pass them by name, never with
-`secrets: inherit`.
+Secrets named in `env_secrets` and `decode_files` are read from the job's `environment`. The caller must still pass
+them with `secrets: inherit`: GitHub gives a reusable workflow an environment secret only when the caller passes it, and
+otherwise it is an empty string. Passing them by name doesn't work, because this workflow doesn't declare them. An empty
+secret fails the export step with its name.
 
 #### Outputs
 
@@ -180,6 +182,8 @@ jobs:
             artifact_name: app-dev-debug
             artifact_path: app/build/outputs/apk/**/*.apk
             runner: arc-runner
+        # Without this, the dev environment's secrets reach the workflow empty.
+        secrets: inherit
 ```
 
 ## Example Usage

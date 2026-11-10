@@ -2,13 +2,15 @@ name: Test workflow scripts
 
 # Runs the tests for logic that lives inline in a reusable workflow or a
 # composite action, such as npm-snapshot-publish's content gate
-# (tests/npm-snapshot-publish-gate.test.mjs) and the Claude Code cache
-# (tests/claude-code-cache.test.mjs).
+# (tests/npm-snapshot-publish-gate.test.mjs), the Claude Code cache
+# (tests/claude-code-cache.test.mjs) and android-gradle-build's secret export
+# (tests/android-gradle-build-secrets.test.mjs).
 
 on:
   pull_request:
     paths:
       - '.github/workflows/npm-snapshot-publish.yml'
+      - '.github/workflows/android-gradle-build.yml'
       - '.github/workflows/claude-code-review.yml'
       - '.github/actions/**'
       - '.github/workflows/test-workflow-scripts.yml'

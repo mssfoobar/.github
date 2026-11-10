@@ -141,6 +141,8 @@ jobs:
                   cache-read-only: ${{ !inputs.cache_write_all_branches && github.ref_name != github.event.repository.default_branch }}
 
             # Looks secrets up by name, so callers choose which ones Gradle sees.
+            # An environment secret reaches this job only when the caller passes
+            # secrets: inherit; otherwise it is an empty string.
             - name: Export secrets
               if: inputs.env_secrets != '' || inputs.decode_files != ''
               working-directory: ${{ inputs.working_directory }}
@@ -148,17 +150,28 @@ jobs:
                   SECRETS_JSON: ${{ toJSON(secrets) }}
                   ENV_SECRETS: ${{ inputs.env_secrets }}
                   DECODE_FILES: ${{ inputs.decode_files }}
+                  ENVIRONMENT: ${{ inputs.environment }}
               run: |
                   set -euo pipefail
-                  secret() { jq -er --arg k "$1" '.[$k] // empty' <<<"$SECRETS_JSON" || { echo "::error::Secret '$1' is not set"; exit 1; }; }
+                  # Prints nothing for a secret that is unset or that the caller didn't pass.
+                  secret() { jq -r --arg k "$1" '.[$k] // empty' <<<"$SECRETS_JSON"; }
+                  missing() {
+                      echo "::error::Secret '$1' is empty. Set it in the '$ENVIRONMENT' environment and call this workflow with 'secrets: inherit'."
+                      exit 1
+                  }
                   for name in $ENV_SECRETS; do
+                      value="$(secret "$name")"
+                      [ -n "$value" ] || missing "$name"
+                      # One write, so a failure never leaves GITHUB_ENV without the closing delimiter.
                       delimiter="EOF_$(openssl rand -hex 8)"
-                      { echo "$name<<$delimiter"; secret "$name"; echo "$delimiter"; } >> "$GITHUB_ENV"
+                      printf '%s<<%s\n%s\n%s\n' "$name" "$delimiter" "$value" "$delimiter" >> "$GITHUB_ENV"
                   done
                   while IFS='=' read -r name path; do
                       [ -z "$name" ] && continue
+                      value="$(secret "$name")"
+                      [ -n "$value" ] || missing "$name"
                       mkdir -p "$(dirname "$path")"
-                      secret "$name" | base64 -d > "$path"
+                      printf '%s' "$value" | base64 -d > "$path"
                   done <<<"$DECODE_FILES"
 
             - name: Run Gradle
