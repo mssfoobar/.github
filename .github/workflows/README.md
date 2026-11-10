@@ -108,6 +108,80 @@ This workflow:
 The GitHub App is required to allow the workflow to have access to modify the manifest repository's contents. Please
 ensure your GitHub App is configured to have access to modify contents the target repo.
 
+### Android Gradle Build Workflow
+
+**File**: `.github/workflows/android-gradle-build.yml`
+
+Runs Gradle tasks on an Android project — the caller's repository or another one in the organization — and uploads
+what they produce. It builds both an app (an APK from a flavor's GitHub Environment secrets) and a library from another
+repository (for example `field-manager`'s AGIL Talk SDK).
+
+#### Inputs
+
+| Name                       | Description                                                                         | Required | Default         |
+| -------------------------- | ----------------------------------------------------------------------------------- | -------- | --------------- |
+| `org_name`                 | Organization that owns the repository to build (e.g. mssfoobar)                     | Yes      | -               |
+| `repository`               | Repository name to build instead of the caller's (needs the App secrets)            | No       | caller's        |
+| `ref`                      | Branch, tag or SHA to build                                                         | No       | triggering ref  |
+| `working_directory`        | Directory holding the Gradle wrapper                                                | No       | `.`             |
+| `gradle_tasks`             | Space-separated Gradle tasks (e.g. `:app:assembleDevDebug`)                         | Yes      | -               |
+| `environment`              | Caller's GitHub Environment to read secrets from                                    | No       | -               |
+| `env_secrets`              | Space-separated secret names exported as environment variables for Gradle           | No       | -               |
+| `decode_files`             | Lines of `SECRET_NAME=path`; each base64 secret is decoded to that path             | No       | -               |
+| `artifact_name`            | Artifact to upload; nothing is uploaded when empty                                  | No       | -               |
+| `artifact_path`            | Paths to upload, one per line                                                       | No       | -               |
+| `retention_days`           | Days to keep the artifact                                                           | No       | `7`             |
+| `cache_write_all_branches` | Save the Gradle cache from every branch, not only the default one                   | No       | `false`         |
+| `java_version`             | Temurin JDK that runs Gradle                                                        | No       | `21`            |
+| `runner`                   | Runner label (e.g. `arc-runner`)                                                    | No       | `ubuntu-latest` |
+
+#### Secrets
+
+| Name              | Description                                           | Required                 |
+| ----------------- | ----------------------------------------------------- | ------------------------ |
+| `APP_ID`          | GitHub App ID, to check out another repository        | When `repository` is set |
+| `APP_PRIVATE_KEY` | GitHub App private key, to check out another repository | When `repository` is set |
+
+Secrets named in `env_secrets` and `decode_files` are read from the job's `environment`; pass them by name, never with
+`secrets: inherit`.
+
+#### Outputs
+
+| Name     | Description                  |
+| -------- | ---------------------------- |
+| `commit` | The commit SHA that was built |
+
+#### Behavior
+
+This workflow:
+
+1. Checks out the repository, with a GitHub App token when it is not the caller's
+2. Sets up the JDK, the Android SDK and Gradle
+3. Restores the Gradle cache (`setup-gradle`) and the Android SDK platforms and build-tools AGP downloads (`actions/cache`)
+4. Exports the named secrets and decodes the named files
+5. Runs the Gradle tasks and uploads the artifact
+
+Caches belong to the caller's repository (10 GB each) and expire after 7 days unused, so a caller that builds on
+demand can add a twice-weekly `schedule` to keep them warm. Artifacts count toward the organization's storage;
+caches do not.
+
+#### Example
+
+```yaml
+jobs:
+    apk:
+        uses: mssfoobar/.github/.github/workflows/android-gradle-build.yml@main
+        with:
+            org_name: ${{ github.repository_owner }}
+            environment: dev
+            gradle_tasks: ":app:assembleDevDebug"
+            env_secrets: "BFF_BASE_URL_DEV IAMS_ISSUER_URL_DEV"
+            decode_files: "GOOGLE_SERVICES_JSON_B64=app/src/dev/google-services.json"
+            artifact_name: app-dev-debug
+            artifact_path: app/build/outputs/apk/**/*.apk
+            runner: arc-runner
+```
+
 ## Example Usage
 
 You can find examples in the `workflow-templates` folder.
