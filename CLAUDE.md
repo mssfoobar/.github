@@ -133,7 +133,7 @@ Updates deployment manifests in a separate repository. Supports both traditional
 Specialized workflow for AGIL Ops Hub modlets - uses custom CLI tool to pack and publish modular UI components as NPM packages.
 
 ### android-gradle-build.yml
-Runs Gradle tasks on an Android project — the caller's or, with `APP_ID`/`APP_PRIVATE_KEY`, another repository in the org — and uploads the result. Exports secrets the caller names (`env_secrets`, `decode_files`) from the job's `environment`, so callers pass them by name, never `secrets: inherit`. Caches Gradle (`setup-gradle`) and the Android SDK packages AGP downloads (`actions/cache`); both caches belong to the caller's repository.
+Runs Gradle tasks on an Android project — the caller's or, with `APP_ID`/`APP_PRIVATE_KEY`, another repository in the org — and uploads the result. Exports secrets the caller names (`env_secrets`, `decode_files`) from the job's `environment`. Callers must pass `secrets: inherit`: GitHub gives a reusable workflow an environment secret only when the caller passes it (otherwise it is empty), and passing by name fails because the names aren't declared. Unlike `claude-code-review.yml`, this workflow runs the caller's own build, so the job sees what a workflow in the caller's repo would; with `repository` set, that other repo's build sees the caller's secrets too, so only pass `inherit` when building it with secrets. Caches Gradle (`setup-gradle`) and the Android SDK packages AGP downloads (`actions/cache`); both caches belong to the caller's repository.
 
 ### claude.yml
 Interactive Claude Code workflow that responds to @claude mentions in:
