@@ -83,7 +83,7 @@ on:
       model:
         required: false
         type: string
-        default: 'claude-sonnet-5'
+        default: 'claude-sonnet-5-5'
         description: 'Model to review with. Pinned rather than floating so behaviour does not shift under a minor action bump.'
       max_turns:
         required: false
