@@ -478,10 +478,14 @@ caller's concurrency group, or cancelled by hand) are not reported. Set
 caller does, with the same marker**, so bumping its pin without that input
 posts two markers per failure and halves its retry budget.
 
-Two outcomes end green and are therefore **not** reported: a PR that edits the
-review workflow (the validation skip above), and a model that finishes without
-calling `gh pr comment`. Both leave no review and no report. The report job
-runs on the same `runner`, so during a runner outage it can expire unposted too.
+One outcome ends green and is therefore **not** reported: a model that finishes
+without calling `gh pr comment`. It leaves no review and no report. The
+action's validation skip (a PR that edits the review workflow, or Anthropic's
+token exchange refusing the run) used to end green too; the "Fail when the
+review did not run" step now fails the job, so it is reported, and a retry
+cannot fix it on a PR that edits the workflow until that PR merges. The report
+job runs on the same `runner`, so during a runner outage it can expire unposted
+too.
 
 Inputs: `runner`, `model`, `max_turns` (default 80), `timeout_minutes`
 (default 40), `review_instructions`, `allow_oauth_fallback`, `allowed_bots`,

@@ -356,6 +356,23 @@ jobs:
             --model ${{ inputs.model }}
             --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(ls:*),Read,Grep,Glob"
 
+      # claude-code-action exits 0 when Anthropic's token exchange refuses its
+      # workflow validation ("The workflow file must exist and have identical
+      # content to the version on the repository's default branch"): it logs one
+      # warning and reviews nothing, and the job concludes `success`. A green
+      # check that reviewed nothing reads as a pass, and a merge rule that counts
+      # a clean review then counts none (AOH-10574). The action sets
+      # `execution_file` only after Claude has run, so an empty one on a
+      # succeeded step means no review happened. Fail, so the check is red and
+      # `report-failure` says so on the PR. This stays advisory: the caller must
+      # not make the check required.
+      - name: Fail when the review did not run
+        if: steps.claude-review.outcome == 'success' && steps.claude-review.outputs.execution_file == ''
+        shell: bash
+        run: |
+          echo "::error::The review step succeeded but Claude never ran, so nothing was reviewed. Usually the action's workflow validation refused the run (see the warning above). A PR that edits this workflow file always hits that until it merges, so only re-run the job or push again for any other PR."
+          exit 1
+
   # A failed review used to leave nothing on the PR but a red check nobody
   # reads. Say so on the PR.
   #
@@ -368,9 +385,11 @@ jobs:
   # bot, dependabot) is never reported, and neither is a clean auth skip, which
   # ends green.
   #
-  # Not reported, because they end GREEN: a PR that edits this workflow (the
-  # action's validation skip), and a model that finishes without calling
-  # `gh pr comment`. Both mean no review and no report.
+  # Not reported, because it ends GREEN: a model that finishes without calling
+  # `gh pr comment`. That means no review and no report. The action's
+  # validation skip used to end green too; the "Fail when the review did not
+  # run" step now turns it red, so it is reported (AOH-10574). A PR that edits
+  # this workflow always hits that skip until it merges, so a retry cannot fix it.
   #
   # Accepted costs: a job that waited 24h for a runner also ends `cancelled`,
   # so a runner outage is reported too (the wording says "cancelled", not
