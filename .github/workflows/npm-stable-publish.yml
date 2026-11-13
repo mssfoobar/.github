@@ -117,7 +117,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish via changesets/action
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
           publish: ${{ inputs.package-manager }} run ${{ inputs.release-script }}
           createGithubReleases: ${{ inputs.create-github-releases }}
