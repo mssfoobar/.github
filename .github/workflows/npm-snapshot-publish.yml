@@ -81,7 +81,12 @@ on:
         required: false
         type: boolean
         default: false
-        description: 'When true, gate publishing on git content change: only publish a version-moved package when its own dir (or a workspace-dep dir, transitively) changed in github.event.before..HEAD, plus every version-moved workspace package a published package will pin (through dependencies, optionalDependencies or peerDependencies), so no published manifest points at an unpublished snapshot. Avoids republishing packages bumped only by a long-lived pending changeset. Falls back to publishing all version-moved packages when the push base ref is unavailable (workflow_dispatch, first push, or force-push).'
+        description: 'When true, gate publishing on git content change: only publish a version-moved package when its own dir (or a workspace-dep dir, transitively) changed in <base>..HEAD, plus every version-moved workspace package a published package will pin (through dependencies, optionalDependencies or peerDependencies), so no published manifest points at an unpublished snapshot. Avoids republishing packages bumped only by a long-lived pending changeset. The base is github.event.before unless content-base-sha is passed. Falls back to publishing all version-moved packages when the base is unavailable (workflow_dispatch, first push, force-push, or an all-zero content-base-sha).'
+      content-base-sha:
+        required: false
+        type: string
+        default: ''
+        description: 'Commit the content gate compares HEAD against, in place of github.event.before. Pass the head commit of the last run that published successfully when runs can be cancelled or fail: github.event.before is the previous push, so a package changed by a push whose run never published is skipped by every later run. Pass 0000000000000000000000000000000000000000 when no such commit is known, which publishes every version-moved package. Empty (the default) keeps github.event.before.'
       build-workspace-dependencies:
         required: false
         type: boolean
@@ -238,7 +243,10 @@ jobs:
           BUILD_DEPS: ${{ inputs.build-workspace-dependencies }}
           BUILD_SCRIPT: ${{ inputs.build-script }}
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.before }}
+          # content-base-sha replaces the previous push as the base. The previous push
+          # is the wrong base when its own run was cancelled or failed: nothing ever
+          # compares that push's changes again.
+          BASE_SHA: ${{ inputs.content-base-sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
         run: |
           # rc → npm dist-tag "next"; everything else uses tag verbatim
@@ -381,6 +389,9 @@ jobs:
             function resolveBase(eventName, baseSha, headSha) {
               if (eventName !== 'push') return null;
               if (!baseSha || /^0+\$/.test(baseSha)) return null;
+              // content-base-sha is caller input and ends up in a shell command: only a
+              // full commit id (sha1 or sha256) goes any further.
+              if (!/^([0-9a-f]{40}|[0-9a-f]{64})\$/i.test(baseSha)) return null;
               try { execSync('git merge-base --is-ancestor ' + baseSha + ' ' + headSha, { stdio: 'ignore' }); }
               catch { return null; }
               return baseSha;

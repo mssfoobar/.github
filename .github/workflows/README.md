@@ -601,6 +601,20 @@ The consuming repo doesn't need to define a `release:<tag>` script — this
 workflow runs `changeset version --snapshot=<tag>.<run_number>` itself,
 detects which packages got bumped, and publishes them directly.
 
+**Content gate (`skip-unchanged-content: true`).** A pending changeset bumps
+its package on every run, so without the gate each push republishes it. With
+the gate, a bumped package publishes only when its files, or a workspace
+dependency's, changed since a base commit. The base is the previous push
+(`github.event.before`) unless the caller passes `content-base-sha`.
+
+Pass `content-base-sha` whenever a run can be cancelled or can fail, which
+includes any caller that queues runs with a `concurrency` group: GitHub keeps
+one waiting run per group and cancels the older one. A push whose run never
+published is then the base of the next run, and the package it changed is
+skipped by every run after it. Pass the head commit of the last run that
+published successfully, so the next run covers everything since. Pass forty
+zeros when no such commit is known: every bumped package then publishes.
+
 #### `npm-stable-publish.yml`
 
 Publishes the stable release on push to main, after the rc → main PR has

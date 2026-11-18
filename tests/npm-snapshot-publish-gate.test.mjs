@@ -10,6 +10,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync, execSync as realExecSync } from 'node:child_process';
 
 const yaml = fs.readFileSync(new URL('../.github/workflows/npm-snapshot-publish.yml', import.meta.url), 'utf8');
 const start = yaml.indexOf('// ---- pure helpers');
@@ -318,4 +321,155 @@ test('build-workspace-dependencies defaults off and fails fast without pnpm', ()
 	assert.match(yaml, /build-workspace-dependencies:\n\s+required: false\n\s+type: boolean\n\s+default: false/);
 	const guard = yaml.indexOf('if (buildDeps && pm !== ');
 	assert.ok(guard > 0 && guard < yaml.indexOf('// ---- content gate'), 'npm guard runs before anything publishes');
+});
+
+// ---- content-base-sha ----
+// ops-hub, 2026-11-02: three merges landed close together. The caller queues its
+// publish runs, and GitHub keeps one waiting run per concurrency group, so the
+// second push's run was cancelled before it started. The third run compared
+// against the previous push (github.event.before), which is the second commit,
+// and skipped the package that commit changed. Nothing published it.
+
+// The helpers with the real execSync, run inside `cwd`. `calls` records every command.
+function loadGateIn(cwd, calls = []) {
+	const execSync = (cmd, opts = {}) => {
+		calls.push(cmd);
+		return realExecSync(cmd, { ...opts, cwd });
+	};
+	return new Function('execSync', helpers + '\nreturn { computePublishSet, buildDepGraph, buildRequireGraph, resolveBase };')(execSync);
+}
+
+// A repository with three packages and three pushes, each changing one package.
+function threePushes(t) {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapshot-gate-'));
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' } }).trim();
+	git('init', '-q', '-b', 'trunk');
+	git('config', 'user.email', 'test@example.com');
+	git('config', 'user.name', 'test');
+	git('config', 'commit.gpgsign', 'false');
+	const names = ['a', 'b', 'c'];
+	for (const n of names) {
+		fs.mkdirSync(path.join(dir, 'packages', n), { recursive: true });
+		fs.writeFileSync(path.join(dir, 'packages', n, 'package.json'), JSON.stringify({ name: n }));
+	}
+	git('add', '.');
+	git('commit', '-q', '-m', 'start');
+	const start = git('rev-parse', 'HEAD');
+	const pushes = names.map((n) => {
+		fs.writeFileSync(path.join(dir, 'packages', n, 'index.js'), '// changed\n');
+		git('add', '.');
+		git('commit', '-q', '-m', 'change ' + n);
+		return git('rev-parse', 'HEAD');
+	});
+	const candidates = names.map((n) => ({ name: n, path: 'packages/' + n, newVersion: '1.0.0' + SNAP }));
+	return { dir, git, start, pushes, candidates };
+}
+
+// The publish step itself, as bash hands it to node. The step is a `node -e "..."`
+// inside a `run:` block, so bash un-escapes the script before node sees it. A
+// stand-in `node` on PATH captures that script; the tests then run it with the
+// real node. What runs here is the step's own code, glue included.
+let renderedStep;
+function stepScript(t) {
+	if (renderedStep) return renderedStep;
+	const at = yaml.indexOf('      - name: Detect changed packages and publish');
+	const runAt = yaml.indexOf('        run: |\n', at);
+	assert.ok(at > 0 && runAt > at, 'the publish step was not found');
+	const block = yaml.slice(runAt + '        run: |\n'.length).split('\n').map((l) => l.replace(/^ {10}/, '')).join('\n');
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapshot-step-'));
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	fs.writeFileSync(path.join(dir, 'node'), '#!/bin/sh\nprintf \'%s\' "$2" > "$RENDER_OUT"\n', { mode: 0o755 });
+	const out = path.join(dir, 'step.js');
+	execFileSync('bash', ['-c', block], { env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH, RENDER_OUT: out, TAG: 'alpha' } });
+	renderedStep = fs.readFileSync(out, 'utf8');
+	return renderedStep;
+}
+
+// Runs the step with dry-run on in `dir`, after bumping every candidate's version as
+// `changeset version --snapshot` would. Returns the names it would publish, sorted.
+function stepPublishes(t, dir, candidates, env) {
+	const pre = {};
+	for (const c of candidates) {
+		const file = path.join(dir, c.path, 'package.json');
+		const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+		pre[c.name] = { version: '1.0.0', path: c.path };
+		fs.writeFileSync(file, JSON.stringify({ ...pkg, version: c.newVersion }));
+	}
+	const preFile = path.join(dir, 'pre-versions.json');
+	fs.writeFileSync(preFile, JSON.stringify(pre));
+	// The step reads the versions from a fixed /tmp path; point this run at its own file.
+	const fixed = "'/tmp/pre-versions.json'";
+	const script = stepScript(t);
+	assert.equal(script.split(fixed).length, 2, 'the step reads pre-versions.json once');
+	const stdout = execFileSync(process.execPath, ['-e', script.replace(fixed, JSON.stringify(preFile))], {
+		cwd: dir,
+		encoding: 'utf8',
+		env: { ...process.env, NPM_TAG: 'alpha', PM: 'npm', SKIP_UNCHANGED: 'true', DRY_RUN: 'true', BUILD_DEPS: 'false', BUILD_SCRIPT: 'build', EVENT_NAME: 'push', ...env },
+	});
+	const lines = stdout.split('\n');
+	const from = lines.findIndex((l) => l.includes('[dry-run] would publish'));
+	assert.ok(from >= 0, 'no dry-run report in: ' + stdout);
+	return lines.slice(from + 1).map((l) => l.trim()).filter(Boolean).sort();
+}
+
+test('the step reads its base from content-base-sha before github.event.before', () => {
+	assert.ok(yaml.includes('BASE_SHA: ${{ inputs.content-base-sha || github.event.before }}'), 'BASE_SHA no longer prefers the input');
+	assert.match(yaml, /content-base-sha:\n\s+required: false\n\s+type: string\n\s+default: ''/);
+});
+
+test('three pushes, the middle run cancelled: against the previous push, the middle package is skipped', (t) => {
+	// The defect, kept as a test so the next one shows what the input changes.
+	const { dir, pushes, candidates } = threePushes(t);
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: pushes[1], HEAD_SHA: pushes[2] }), ['c']);
+});
+
+test('three pushes, the middle run cancelled: against the last push that published, the middle package publishes', (t) => {
+	const { dir, pushes, candidates } = threePushes(t);
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: pushes[0], HEAD_SHA: pushes[2] }), ['b', 'c']);
+});
+
+test('no base means every version-moved package publishes: all zeros, an empty value, a manual run', (t) => {
+	const { dir, pushes, candidates } = threePushes(t);
+	for (const env of [{ BASE_SHA: '0'.repeat(40) }, { BASE_SHA: '' }, { BASE_SHA: pushes[1], EVENT_NAME: 'workflow_dispatch' }]) {
+		assert.deepEqual(stepPublishes(t, dir, candidates, { HEAD_SHA: pushes[2], ...env }), ['a', 'b', 'c'], JSON.stringify(env));
+	}
+});
+
+test('a base that is not an ancestor of HEAD means no base', (t) => {
+	const { dir, git, start, pushes, candidates } = threePushes(t);
+	git('checkout', '-q', '-b', 'side', start);
+	git('commit', '-q', '--allow-empty', '-m', 'elsewhere');
+	const side = git('rev-parse', 'HEAD');
+	git('checkout', '-q', 'trunk');
+	assert.equal(loadGateIn(dir).resolveBase('push', side, pushes[2]), null);
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: side, HEAD_SHA: pushes[2] }), ['a', 'b', 'c']);
+});
+
+test('a base that is not a commit id is never passed to a shell, and means no base', (t) => {
+	const { dir, pushes, candidates } = threePushes(t);
+	const marker = path.join(dir, 'injected');
+	const bad = ['HEAD; touch ' + marker, '$(touch ' + marker + ')', 'develop', 'abc123', pushes[0] + ' --output=' + marker, pushes[0] + '\n'];
+	for (const value of bad) {
+		const calls = [];
+		assert.equal(loadGateIn(dir, calls).resolveBase('push', value, pushes[2]), null, value);
+		assert.deepEqual(calls, [], 'a command ran for ' + value);
+	}
+	// And through the step itself.
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: bad[0], HEAD_SHA: pushes[2] }), ['a', 'b', 'c']);
+	assert.equal(fs.existsSync(marker), false);
+});
+
+test('existing behaviour kept: an event other than push has no base, whatever the input', (t) => {
+	const { dir, pushes } = threePushes(t);
+	assert.equal(loadGateIn(dir).resolveBase('workflow_dispatch', pushes[0], pushes[2]), null);
+});
+
+test('a full commit id that is an ancestor is the base, in either hash length', (t) => {
+	const { dir, pushes } = threePushes(t);
+	assert.equal(loadGateIn(dir).resolveBase('push', pushes[0], pushes[2]), pushes[0]);
+	// A sha256 repository's ids are 64 hex digits; the format check must let them reach git.
+	const calls = [];
+	loadGateIn(dir, calls).resolveBase('push', 'a'.repeat(64), pushes[2]);
+	assert.equal(calls.length, 1);
 });
