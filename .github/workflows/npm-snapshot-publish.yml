@@ -420,7 +420,9 @@ jobs:
               if (base === null) {
                 console.log('Content gate: base ref unavailable (' + process.env.EVENT_NAME + ') — publishing all ' + candidates.length + ' version-moved package(s).');
               } else {
-                const changedPaths = execSync('git diff --name-only ' + base + ' ' + process.env.HEAD_SHA, { encoding: 'utf8' }).split('\\n').filter(Boolean);
+                // --no-renames: a file moved between packages must list its old path too,
+                // or the package it left is reported unchanged.
+                const changedPaths = execSync('git diff --name-only --no-renames ' + base + ' ' + process.env.HEAD_SHA, { encoding: 'utf8' }).split('\\n').filter(Boolean);
                 const pinnedBy = {};
                 const keep = computePublishSet(candidates, changedPaths, buildDepGraph(candidates), requireGraph, pinnedBy);
                 const skipped = candidates.filter(c => !keep.has(c.name));

@@ -460,6 +460,16 @@ test('a base that is not a commit id is never passed to a shell, and means no ba
 	assert.equal(fs.existsSync(marker), false);
 });
 
+test('a file moved from one package to another changes both', (t) => {
+	// With rename detection the diff lists only the new path, and the package the
+	// file left is reported unchanged.
+	const { dir, git, pushes, candidates } = threePushes(t);
+	git('mv', 'packages/a/index.js', 'packages/c/moved.js');
+	git('commit', '-q', '-m', 'move a file from a to c');
+	const head = git('rev-parse', 'HEAD');
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: pushes[2], HEAD_SHA: head }), ['a', 'c']);
+});
+
 test('existing behaviour kept: an event other than push has no base, whatever the input', (t) => {
 	const { dir, pushes } = threePushes(t);
 	assert.equal(loadGateIn(dir).resolveBase('workflow_dispatch', pushes[0], pushes[2]), null);
