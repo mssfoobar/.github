@@ -366,14 +366,51 @@ function threePushes(t) {
 	return { dir, git, start, pushes, candidates };
 }
 
-// What the content gate publishes for `base`, as the workflow step computes it.
-function publishedFrom(dir, candidates, base, head) {
-	const gate = loadGateIn(dir);
-	const resolved = gate.resolveBase('push', base, head);
-	if (resolved === null) return candidates.map((c) => c.name);
-	const changed = realExecSync('git diff --name-only ' + resolved + ' ' + head, { cwd: dir, encoding: 'utf8' }).split('\n').filter(Boolean);
-	const requireGraph = gate.buildRequireGraph(candidates, () => ({}));
-	return [...gate.computePublishSet(candidates, changed, gate.buildDepGraph(candidates), requireGraph)].sort();
+// The publish step itself, as bash hands it to node. The step is a `node -e "..."`
+// inside a `run:` block, so bash un-escapes the script before node sees it. A
+// stand-in `node` on PATH captures that script; the tests then run it with the
+// real node. What runs here is the step's own code, glue included.
+let renderedStep;
+function stepScript(t) {
+	if (renderedStep) return renderedStep;
+	const at = yaml.indexOf('      - name: Detect changed packages and publish');
+	const runAt = yaml.indexOf('        run: |\n', at);
+	assert.ok(at > 0 && runAt > at, 'the publish step was not found');
+	const block = yaml.slice(runAt + '        run: |\n'.length).split('\n').map((l) => l.replace(/^ {10}/, '')).join('\n');
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapshot-step-'));
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	fs.writeFileSync(path.join(dir, 'node'), '#!/bin/sh\nprintf \'%s\' "$2" > "$RENDER_OUT"\n', { mode: 0o755 });
+	const out = path.join(dir, 'step.js');
+	execFileSync('bash', ['-c', block], { env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH, RENDER_OUT: out, TAG: 'alpha' } });
+	renderedStep = fs.readFileSync(out, 'utf8');
+	return renderedStep;
+}
+
+// Runs the step with dry-run on in `dir`, after bumping every candidate's version as
+// `changeset version --snapshot` would. Returns the names it would publish, sorted.
+function stepPublishes(t, dir, candidates, env) {
+	const pre = {};
+	for (const c of candidates) {
+		const file = path.join(dir, c.path, 'package.json');
+		const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+		pre[c.name] = { version: '1.0.0', path: c.path };
+		fs.writeFileSync(file, JSON.stringify({ ...pkg, version: c.newVersion }));
+	}
+	const preFile = path.join(dir, 'pre-versions.json');
+	fs.writeFileSync(preFile, JSON.stringify(pre));
+	// The step reads the versions from a fixed /tmp path; point this run at its own file.
+	const fixed = "'/tmp/pre-versions.json'";
+	const script = stepScript(t);
+	assert.equal(script.split(fixed).length, 2, 'the step reads pre-versions.json once');
+	const stdout = execFileSync(process.execPath, ['-e', script.replace(fixed, JSON.stringify(preFile))], {
+		cwd: dir,
+		encoding: 'utf8',
+		env: { ...process.env, NPM_TAG: 'alpha', PM: 'npm', SKIP_UNCHANGED: 'true', DRY_RUN: 'true', BUILD_DEPS: 'false', BUILD_SCRIPT: 'build', EVENT_NAME: 'push', ...env },
+	});
+	const lines = stdout.split('\n');
+	const from = lines.findIndex((l) => l.includes('[dry-run] would publish'));
+	assert.ok(from >= 0, 'no dry-run report in: ' + stdout);
+	return lines.slice(from + 1).map((l) => l.trim()).filter(Boolean).sort();
 }
 
 test('the step reads its base from content-base-sha before github.event.before', () => {
@@ -384,17 +421,19 @@ test('the step reads its base from content-base-sha before github.event.before',
 test('three pushes, the middle run cancelled: against the previous push, the middle package is skipped', (t) => {
 	// The defect, kept as a test so the next one shows what the input changes.
 	const { dir, pushes, candidates } = threePushes(t);
-	assert.deepEqual(publishedFrom(dir, candidates, pushes[1], pushes[2]), ['c']);
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: pushes[1], HEAD_SHA: pushes[2] }), ['c']);
 });
 
 test('three pushes, the middle run cancelled: against the last push that published, the middle package publishes', (t) => {
 	const { dir, pushes, candidates } = threePushes(t);
-	assert.deepEqual(publishedFrom(dir, candidates, pushes[0], pushes[2]), ['b', 'c']);
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: pushes[0], HEAD_SHA: pushes[2] }), ['b', 'c']);
 });
 
-test('an all-zero base means no base: every version-moved package publishes', (t) => {
+test('no base means every version-moved package publishes: all zeros, an empty value, a manual run', (t) => {
 	const { dir, pushes, candidates } = threePushes(t);
-	assert.deepEqual(publishedFrom(dir, candidates, '0'.repeat(40), pushes[2]), ['a', 'b', 'c']);
+	for (const env of [{ BASE_SHA: '0'.repeat(40) }, { BASE_SHA: '' }, { BASE_SHA: pushes[1], EVENT_NAME: 'workflow_dispatch' }]) {
+		assert.deepEqual(stepPublishes(t, dir, candidates, { HEAD_SHA: pushes[2], ...env }), ['a', 'b', 'c'], JSON.stringify(env));
+	}
 });
 
 test('a base that is not an ancestor of HEAD means no base', (t) => {
@@ -402,17 +441,22 @@ test('a base that is not an ancestor of HEAD means no base', (t) => {
 	git('checkout', '-q', '-b', 'side', start);
 	git('commit', '-q', '--allow-empty', '-m', 'elsewhere');
 	const side = git('rev-parse', 'HEAD');
-	assert.deepEqual(publishedFrom(dir, candidates, side, pushes[2]), ['a', 'b', 'c']);
+	git('checkout', '-q', 'trunk');
+	assert.equal(loadGateIn(dir).resolveBase('push', side, pushes[2]), null);
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: side, HEAD_SHA: pushes[2] }), ['a', 'b', 'c']);
 });
 
 test('a base that is not a commit id is never passed to a shell, and means no base', (t) => {
-	const { dir, pushes } = threePushes(t);
+	const { dir, pushes, candidates } = threePushes(t);
 	const marker = path.join(dir, 'injected');
-	for (const bad of ['HEAD; touch ' + marker, '$(touch ' + marker + ')', 'develop', 'abc123', pushes[0] + ' --output=' + marker]) {
+	const bad = ['HEAD; touch ' + marker, '$(touch ' + marker + ')', 'develop', 'abc123', pushes[0] + ' --output=' + marker, pushes[0] + '\n'];
+	for (const value of bad) {
 		const calls = [];
-		assert.equal(loadGateIn(dir, calls).resolveBase('push', bad, pushes[2]), null, bad);
-		assert.deepEqual(calls, [], 'a command ran for ' + bad);
+		assert.equal(loadGateIn(dir, calls).resolveBase('push', value, pushes[2]), null, value);
+		assert.deepEqual(calls, [], 'a command ran for ' + value);
 	}
+	// And through the step itself.
+	assert.deepEqual(stepPublishes(t, dir, candidates, { BASE_SHA: bad[0], HEAD_SHA: pushes[2] }), ['a', 'b', 'c']);
 	assert.equal(fs.existsSync(marker), false);
 });
 
