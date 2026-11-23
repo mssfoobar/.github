@@ -1,5 +1,10 @@
 name: Monorepo Changeset Release
 
+# Eager-bump release for an npm-workspaces monorepo. On a push to the release
+# branch, `changeset version` consumes the pending changesets; each package
+# whose version changed then gets its own tag (`<name without scope>/v<version>`)
+# and its own GitHub Release (`<name> v<version>`).
+
 on:
     workflow_call:
         inputs:
@@ -89,119 +94,106 @@ jobs:
               if: steps.check_changesets.outputs.has_changesets == 'true'
               run: npx changeset version
 
-            - name: Detect changed packages
+            - name: Plan the releases
               if: steps.check_changesets.outputs.has_changesets == 'true'
               id: changes
               run: |
-                  node -e "
-                    const fs = require('fs');
-                    const pre = JSON.parse(fs.readFileSync('/tmp/pre-versions.json', 'utf8'));
-                    const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-                    const workspaces = root.workspaces || [];
+                  node <<'JS'
+                  const fs = require('fs');
 
+                  // ---- pure helpers (tests/monorepo-changeset-release.test.mjs runs these)
+
+                  // The packages whose version `changeset version` changed. Each one
+                  // is released on its own: tag `<name without scope>/v<version>`
+                  // (callers trigger builds on these tags, so keep the format) and
+                  // a GitHub Release titled `<name> v<version>`, as ops-hub titles
+                  // its Releases. A package with no version before the bump is
+                  // skipped.
+                  function changedPackages(pre, current) {
                     const changed = [];
-                    let releaseVersion = null;
-
-                    for (const ws of workspaces) {
-                      const pkg = JSON.parse(fs.readFileSync(ws + '/package.json', 'utf8'));
-                      const oldVersion = pre[pkg.name]?.version;
-                      if (oldVersion && oldVersion !== pkg.version) {
-                        // Derive tag prefix: @mssfoobar/msr-app → msr-app
-                        const tagPrefix = pkg.name.replace(/^@[^/]+\//, '');
-                        changed.push({
-                          name: pkg.name,
-                          path: ws,
-                          oldVersion: oldVersion,
-                          newVersion: pkg.version,
-                          tagPrefix: tagPrefix,
-                          tag: tagPrefix + '/v' + pkg.version
-                        });
-                        if (!releaseVersion) releaseVersion = pkg.version;
-                      }
+                    for (const pkg of current) {
+                      const oldVersion = pre[pkg.name] && pre[pkg.name].version;
+                      if (!oldVersion || oldVersion === pkg.version) continue;
+                      changed.push({
+                        name: pkg.name,
+                        path: pkg.path,
+                        oldVersion: oldVersion,
+                        newVersion: pkg.version,
+                        tag: pkg.name.replace(/^@[^/]+\//, '') + '/v' + pkg.version,
+                        title: pkg.name + ' v' + pkg.version,
+                      });
                     }
+                    return changed;
+                  }
 
-                    if (changed.length === 0) {
-                      console.log('No version changes detected.');
-                      fs.appendFileSync(process.env.GITHUB_OUTPUT, 'has_changes=false\n');
-                    } else {
-                      console.log('Changed packages:', JSON.stringify(changed, null, 2));
-                      fs.appendFileSync(process.env.GITHUB_OUTPUT, 'has_changes=true\n');
-                      fs.appendFileSync(process.env.GITHUB_OUTPUT, 'release_version=' + releaseVersion + '\n');
-                      fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed_json=' + JSON.stringify(changed) + '\n');
+                  // Names every released package, for the release commit and the sync PR.
+                  function releaseLabel(changed) {
+                    return changed.map((c) => c.name + '@v' + c.newVersion).join(', ');
+                  }
 
-                      // Build summary for release notes
-                      const summary = changed.map(c => '- **' + c.name + '**: ' + c.oldVersion + ' → ' + c.newVersion).join('\n');
-                      fs.writeFileSync('/tmp/changed-summary.txt', summary);
-                    }
-                  "
+                  // The body of a CHANGELOG.md's `## <version>` section, without the
+                  // heading; null when there is no such section. Compared as text, so
+                  // `1.5.2` matches neither `1.5.20` nor `1x5x2`.
+                  function changelogEntry(changelog, version) {
+                    const lines = changelog.split('\n');
+                    const heading = '## ' + version;
+                    const at = lines.findIndex((l) => l === heading || l.startsWith(heading + ' '));
+                    if (at < 0) return null;
+                    let stop = lines.findIndex((l, i) => i > at && l.startsWith('## '));
+                    if (stop < 0) stop = lines.length;
+                    return lines.slice(at + 1, stop).join('\n').trim();
+                  }
 
-            - name: Collect release notes
-              if: steps.changes.outputs.has_changes == 'true'
-              run: |
-                  CHANGED='${{ steps.changes.outputs.changed_json }}'
+                  // ---- main
+                  const pre = JSON.parse(fs.readFileSync('/tmp/pre-versions.json', 'utf8'));
+                  const root = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+                  const current = (root.workspaces || []).map((ws) => {
+                    const pkg = JSON.parse(fs.readFileSync(ws + '/package.json', 'utf8'));
+                    return { path: ws, name: pkg.name, version: pkg.version };
+                  });
+                  const changed = changedPackages(pre, current);
+                  const out = process.env.GITHUB_OUTPUT;
+                  if (changed.length === 0) {
+                    console.log('No version changes detected.');
+                    fs.appendFileSync(out, 'has_changes=false\n');
+                    process.exit(0);
+                  }
 
-                  echo "## Packages" > /tmp/release-notes.md
-                  echo "" >> /tmp/release-notes.md
-                  cat /tmp/changed-summary.txt >> /tmp/release-notes.md
-                  echo "" >> /tmp/release-notes.md
-
-                  # Collect changelog entries from each changed package
-                  echo "$CHANGED" | node -e "
-                    const fs = require('fs');
-                    const changed = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8'));
-                    let notes = '';
-                    for (const pkg of changed) {
-                      const clPath = pkg.path + '/CHANGELOG.md';
-                      if (fs.existsSync(clPath)) {
-                        const cl = fs.readFileSync(clPath, 'utf8');
-                        // Extract the latest version section
-                        const versionEscaped = pkg.newVersion.replace(/\./g, '\\\\.');
-                        const re = new RegExp('^## ' + versionEscaped + '.*$', 'm');
-                        const match = cl.match(re);
-                        if (match) {
-                          const start = cl.indexOf(match[0]);
-                          const nextSection = cl.indexOf('\n## ', start + 1);
-                          const entry = nextSection > 0
-                            ? cl.slice(start, nextSection).trim()
-                            : cl.slice(start).trim();
-                          notes += '\n---\n\n' + entry + '\n';
-                        }
-                      }
-                    }
-                    fs.appendFileSync('/tmp/release-notes.md', notes);
-                  "
-
-                  echo "" >> /tmp/release-notes.md
-                  cat /tmp/release-notes.md
+                  fs.mkdirSync('/tmp/release-notes', { recursive: true });
+                  changed.forEach((c, i) => {
+                    const clPath = c.path + '/CHANGELOG.md';
+                    const entry = fs.existsSync(clPath) ? changelogEntry(fs.readFileSync(clPath, 'utf8'), c.newVersion) : null;
+                    c.notesFile = '/tmp/release-notes/' + i + '.md';
+                    fs.writeFileSync(c.notesFile, (entry || 'Release ' + c.title + '.') + '\n');
+                    console.log('---- ' + c.title + ' (' + c.oldVersion + ' -> ' + c.newVersion + ', tag ' + c.tag + ')');
+                    console.log(fs.readFileSync(c.notesFile, 'utf8'));
+                  });
+                  fs.writeFileSync('/tmp/changed.json', JSON.stringify(changed));
+                  fs.appendFileSync(out, 'has_changes=true\n');
+                  fs.appendFileSync(out, 'label=' + releaseLabel(changed) + '\n');
+                  JS
 
             - name: Commit version bump
               if: steps.changes.outputs.has_changes == 'true'
               env:
-                  RELEASE_VERSION: ${{ steps.changes.outputs.release_version }}
-                  BRANCH: ${{ github.ref_name }}
+                  LABEL: ${{ steps.changes.outputs.label }}
               run: |
                   git config user.name "github-actions[bot]"
                   git config user.email "github-actions[bot]@users.noreply.github.com"
                   git add -A
-                  git commit -m "chore(release): v${RELEASE_VERSION}"
+                  git commit -m "chore(release): ${LABEL}"
 
             - name: Create per-package tags
               if: steps.changes.outputs.has_changes == 'true'
-              env:
-                  RELEASE_VERSION: ${{ steps.changes.outputs.release_version }}
               run: |
-                  # Create a release tag
-                  git tag -a "v${RELEASE_VERSION}" -m "v${RELEASE_VERSION}"
-
-                  # Create per-package tags for reference
-                  echo '${{ steps.changes.outputs.changed_json }}' | node -e "
-                    const { execSync } = require('child_process');
-                    const changed = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8'));
-                    for (const pkg of changed) {
-                      console.log('Creating tag: ' + pkg.tag);
-                      execSync('git tag -a \"' + pkg.tag + '\" -m \"' + pkg.tag + '\"');
-                    }
-                  "
+                  # One annotated tag per released package. There is no repo-wide
+                  # `v<version>` tag: it named the release after whichever package
+                  # came first in `workspaces`. A tag that already exists fails this
+                  # step, before anything is pushed.
+                  for tag in $(jq -r '.[].tag' /tmp/changed.json); do
+                    echo "Creating tag: $tag"
+                    git tag -a "$tag" -m "$tag"
+                  done
 
             - name: Push commit and tags
               if: steps.changes.outputs.has_changes == 'true'
@@ -209,27 +201,37 @@ jobs:
                   BRANCH: ${{ github.ref_name }}
               run: git push origin "$BRANCH" --follow-tags
 
-            - name: Create GitHub Release
+            - name: Create GitHub Releases
               if: steps.changes.outputs.has_changes == 'true'
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_VERSION: ${{ steps.changes.outputs.release_version }}
               run: |
-                  gh release create "v${RELEASE_VERSION}" \
-                    --title "v${RELEASE_VERSION}" \
-                    --notes-file /tmp/release-notes.md
+                  # One Release per package, on its tag. A failure doesn't stop the
+                  # others; the step fails at the end and names each missing one.
+                  # The tags are pushed by now, so create a missing Release by hand.
+                  failed=""
+                  while IFS=$'\t' read -r tag title notes; do
+                    if ! gh release create "$tag" --verify-tag --title "$title" --notes-file "$notes" </dev/null; then
+                      echo "::error title=GitHub Release not created::${tag}: create it with gh release create ${tag} --verify-tag --title '${title}'"
+                      failed="${failed} ${tag}"
+                    fi
+                  done < <(jq -r '.[] | [.tag, .title, .notesFile] | @tsv' /tmp/changed.json)
+                  if [ -n "$failed" ]; then
+                    echo "GitHub Releases not created:${failed}"
+                    exit 1
+                  fi
 
             - name: Create PR to sync back
               if: steps.changes.outputs.has_changes == 'true'
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_VERSION: ${{ steps.changes.outputs.release_version }}
+                  LABEL: ${{ steps.changes.outputs.label }}
                   SYNC_BRANCH: ${{ inputs.sync-branch }}
                   BRANCH: ${{ github.ref_name }}
               run: |
                   gh pr create \
                     --base "$SYNC_BRANCH" \
                     --head "$BRANCH" \
-                    --title "chore: sync release v${RELEASE_VERSION} back to ${SYNC_BRANCH}" \
+                    --title "chore: sync release ${LABEL} back to ${SYNC_BRANCH}" \
                     --body "Automated PR to sync version bump and changelog back to ${SYNC_BRANCH}." \
                     || echo "PR already exists or cannot be created — skipping."
