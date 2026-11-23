@@ -133,9 +133,9 @@ jobs:
 
                   // The body of a CHANGELOG.md's `## <version>` section, without the
                   // heading; null when there is no such section. Compared as text, so
-                  // `1.5.2` matches neither `1.5.20` nor `1x5x2`.
+                  // `1.5.2` matches neither `1.5.20` nor `1x5x2`. CRLF files read too.
                   function changelogEntry(changelog, version) {
-                    const lines = changelog.split('\n');
+                    const lines = changelog.split(/\r?\n/);
                     const heading = '## ' + version;
                     const at = lines.findIndex((l) => l === heading || l.startsWith(heading + ' '));
                     if (at < 0) return null;
@@ -164,6 +164,7 @@ jobs:
                     const clPath = c.path + '/CHANGELOG.md';
                     const entry = fs.existsSync(clPath) ? changelogEntry(fs.readFileSync(clPath, 'utf8'), c.newVersion) : null;
                     c.notesFile = '/tmp/release-notes/' + i + '.md';
+                    if (!entry) console.log('::warning title=No changelog entry::' + clPath + ' has no "## ' + c.newVersion + '" section; the Release says only "Release ' + c.title + '."');
                     fs.writeFileSync(c.notesFile, (entry || 'Release ' + c.title + '.') + '\n');
                     console.log('---- ' + c.title + ' (' + c.oldVersion + ' -> ' + c.newVersion + ', tag ' + c.tag + ')');
                     console.log(fs.readFileSync(c.notesFile, 'utf8'));
@@ -189,17 +190,24 @@ jobs:
                   # One annotated tag per released package. There is no repo-wide
                   # `v<version>` tag: it named the release after whichever package
                   # came first in `workspaces`. A tag that already exists fails this
-                  # step, before anything is pushed.
-                  for tag in $(jq -r '.[].tag' /tmp/changed.json); do
+                  # step, before anything is pushed. jq runs on its own line so that
+                  # its failure fails the step instead of tagging nothing.
+                  tags=$(jq -r '.[].tag' /tmp/changed.json)
+                  [ -n "$tags" ] || { echo "::error::/tmp/changed.json lists no tags"; exit 1; }
+                  for tag in $tags; do
                     echo "Creating tag: $tag"
                     git tag -a "$tag" -m "$tag"
                   done
 
             - name: Push commit and tags
+              id: push
               if: steps.changes.outputs.has_changes == 'true'
               env:
                   BRANCH: ${{ github.ref_name }}
-              run: git push origin "$BRANCH" --follow-tags
+              # --atomic: if the branch push is refused (main moved since checkout),
+              # no tag lands either. Without it the tags still pushed, onto a
+              # commit that isn't on the branch, and fired the callers' tag builds.
+              run: git push --atomic origin "$BRANCH" --follow-tags
 
             - name: Create GitHub Releases
               if: steps.changes.outputs.has_changes == 'true'
@@ -209,20 +217,24 @@ jobs:
                   # One Release per package, on its tag. A failure doesn't stop the
                   # others; the step fails at the end and names each missing one.
                   # The tags are pushed by now, so create a missing Release by hand.
+                  rows=$(jq -r '.[] | [.tag, .title, .notesFile] | @tsv' /tmp/changed.json)
+                  [ -n "$rows" ] || { echo "::error::/tmp/changed.json lists no packages"; exit 1; }
                   failed=""
                   while IFS=$'\t' read -r tag title notes; do
                     if ! gh release create "$tag" --verify-tag --title "$title" --notes-file "$notes" </dev/null; then
-                      echo "::error title=GitHub Release not created::${tag}: create it with gh release create ${tag} --verify-tag --title '${title}'"
+                      echo "::error title=GitHub Release not created::${tag}: create it with gh release create ${tag} --verify-tag --title '${title}', with the package's CHANGELOG section for that version as notes"
                       failed="${failed} ${tag}"
                     fi
-                  done < <(jq -r '.[] | [.tag, .title, .notesFile] | @tsv' /tmp/changed.json)
+                  done <<< "$rows"
                   if [ -n "$failed" ]; then
                     echo "GitHub Releases not created:${failed}"
                     exit 1
                   fi
 
+            # Runs even when a Release failed: the pushed commit consumed the
+            # changesets, and develop must get it or it would release them again.
             - name: Create PR to sync back
-              if: steps.changes.outputs.has_changes == 'true'
+              if: ${{ !cancelled() && steps.push.outcome == 'success' }}
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   LABEL: ${{ steps.changes.outputs.label }}
@@ -234,4 +246,4 @@ jobs:
                     --head "$BRANCH" \
                     --title "chore: sync release ${LABEL} back to ${SYNC_BRANCH}" \
                     --body "Automated PR to sync version bump and changelog back to ${SYNC_BRANCH}." \
-                    || echo "PR already exists or cannot be created — skipping."
+                    || echo "::warning title=Sync PR not created::No PR from ${BRANCH} to ${SYNC_BRANCH} was opened (one may already exist). If none is open, open it by hand, or ${SYNC_BRANCH} will release these changesets again."

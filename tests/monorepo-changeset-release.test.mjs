@@ -10,6 +10,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const yaml = fs.readFileSync(new URL('../.github/workflows/monorepo-changeset-release.yml', import.meta.url), 'utf8');
 const start = yaml.indexOf('// ---- pure helpers');
@@ -79,6 +82,14 @@ test('an unscoped package keeps its name in the tag and title', () => {
 	);
 });
 
+test('a prerelease bump is released under its full version', () => {
+	const changed = h.changedPackages(msrPre, [{ path: 'app', name: '@mssfoobar/msr-app', version: '1.6.0-rc.0' }]);
+	assert.deepEqual(
+		changed.map(({ tag, title }) => ({ tag, title })),
+		[{ tag: 'msr-app/v1.6.0-rc.0', title: '@mssfoobar/msr-app v1.6.0-rc.0' }],
+	);
+});
+
 test('a package with no version before the bump is not released (unchanged behaviour)', () => {
 	const changed = h.changedPackages(msrPre, [{ path: 'new', name: '@mssfoobar/msr-new', version: '0.0.1' }]);
 	assert.deepEqual(changed, []);
@@ -126,7 +137,94 @@ test('a version is matched literally, not as a pattern', () => {
 	assert.equal(h.changelogEntry('## 1.5.20\n\nlater\n\n## 1.5.2\n\nright\n', '1.5.2'), 'right');
 });
 
+test('a heading with trailing text still matches; an rc heading does not match the final version', () => {
+	assert.equal(h.changelogEntry('## 1.0.0 (2026-01-01)\n\nnotes\n', '1.0.0'), 'notes');
+	assert.equal(h.changelogEntry('## 1.0.0-rc.1\n\nrc\n', '1.0.0'), null);
+	assert.equal(h.changelogEntry('## 1.0.0-rc.1\n\nrc\n\n## 1.0.0\n\nfinal\n', '1.0.0'), 'final');
+});
+
+test('a CRLF changelog reads the same as an LF one', () => {
+	assert.equal(h.changelogEntry('## 1.0.0\r\n\r\n- notes\r\n\r\n## 0.9.0\r\n\r\nold\r\n', '1.0.0'), '- notes');
+});
+
+test('an empty section is an empty entry, which the caller replaces with a placeholder', () => {
+	assert.equal(h.changelogEntry('## 1.0.0\n\n## 0.9.0\n\nold\n', '1.0.0'), '');
+});
+
 test('no section for the version: no entry', () => {
 	assert.equal(h.changelogEntry(changelog, '9.9.9'), null);
 	assert.equal(h.changelogEntry('', '1.0.0'), null);
+});
+
+// The `main` section, run as the step runs it, in a temp checkout. The later
+// bash steps read /tmp/changed.json's tag, title and notesFile and the `label`
+// output, so this pins that contract.
+const mainEnd = yaml.indexOf('\n                  JS\n', end);
+assert.ok(mainEnd > end, 'heredoc terminator not found after the main marker');
+const mainSection = yaml.slice(end, mainEnd);
+
+function runPlan({ workspaces, pre }) {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcr-'));
+	try {
+		const tmp = path.join(dir, 'tmp');
+		const repo = path.join(dir, 'repo');
+		fs.mkdirSync(tmp);
+		fs.mkdirSync(repo);
+		fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ workspaces: workspaces.map((w) => w.path) }));
+		for (const w of workspaces) {
+			fs.mkdirSync(path.join(repo, w.path));
+			fs.writeFileSync(path.join(repo, w.path, 'package.json'), JSON.stringify({ name: w.name, version: w.version }));
+			if (w.changelog !== undefined) fs.writeFileSync(path.join(repo, w.path, 'CHANGELOG.md'), w.changelog);
+		}
+		fs.writeFileSync(path.join(tmp, 'pre-versions.json'), JSON.stringify(pre));
+		const out = path.join(dir, 'github-output');
+		fs.writeFileSync(out, '');
+		const script = ("const fs = require('fs');\n" + helpers + mainSection).replaceAll('/tmp/', tmp + '/');
+		execFileSync(process.execPath, ['-e', script], { cwd: repo, env: { ...process.env, GITHUB_OUTPUT: out }, stdio: 'pipe' });
+		const outputs = Object.fromEntries(
+			fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+		);
+		const changedPath = path.join(tmp, 'changed.json');
+		const changed = fs.existsSync(changedPath) ? JSON.parse(fs.readFileSync(changedPath, 'utf8')) : null;
+		const notes = changed ? changed.map((c) => fs.readFileSync(c.notesFile, 'utf8')) : null;
+		return { outputs, changed, notes };
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+test('main: writes the outputs, changed.json and one notes file per released package', () => {
+	const { outputs, changed, notes } = runPlan({
+		workspaces: [
+			{ path: 'web', name: '@mssfoobar/msr-web', version: '2.0.1' },
+			{ path: 'app', name: '@mssfoobar/msr-app', version: '2.0.0', changelog: '# @mssfoobar/msr-app\n\n## 2.0.0\n\n- new\n\n## 1.5.2\n\n- old\n' },
+		],
+		pre: { '@mssfoobar/msr-web': { version: '2.0.0', path: 'web' }, '@mssfoobar/msr-app': { version: '1.5.2', path: 'app' } },
+	});
+	assert.equal(outputs.has_changes, 'true');
+	assert.equal(outputs.label, '@mssfoobar/msr-web@v2.0.1, @mssfoobar/msr-app@v2.0.0');
+	assert.deepEqual(
+		changed.map(({ tag, title }) => ({ tag, title })),
+		[
+			{ tag: 'msr-web/v2.0.1', title: '@mssfoobar/msr-web v2.0.1' },
+			{ tag: 'msr-app/v2.0.0', title: '@mssfoobar/msr-app v2.0.0' },
+		],
+	);
+	// msr-web has no CHANGELOG.md: placeholder notes, not an empty Release.
+	assert.deepEqual(notes, ['Release @mssfoobar/msr-web v2.0.1.\n', '- new\n']);
+});
+
+test('main: nothing changed sets has_changes=false and writes no changed.json', () => {
+	const { outputs, changed } = runPlan({
+		workspaces: [{ path: 'app', name: '@mssfoobar/msr-app', version: '1.5.2' }],
+		pre: { '@mssfoobar/msr-app': { version: '1.5.2', path: 'app' } },
+	});
+	assert.deepEqual(outputs, { has_changes: 'false' });
+	assert.equal(changed, null);
+});
+
+test('the bash steps read the fields main writes', () => {
+	assert.ok(yaml.includes(`jq -r '.[].tag' /tmp/changed.json`), 'tag step no longer reads .tag');
+	assert.ok(yaml.includes(`jq -r '.[] | [.tag, .title, .notesFile] | @tsv' /tmp/changed.json`), 'release step no longer reads .tag, .title, .notesFile');
+	assert.ok(yaml.includes('LABEL: ${{ steps.changes.outputs.label }}'), 'label output no longer consumed');
 });
