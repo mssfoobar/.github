@@ -3,6 +3,11 @@ name: NPM Changeset Release
 on:
     workflow_call:
         inputs:
+            runner:
+                required: false
+                type: string
+                default: 'arc-runner'
+                description: "Runner label. Defaults to the self-hosted arc-runner scale set. Pass ubuntu-latest only when calling from a public repository."
             node-version:
                 required: true
                 type: string
@@ -25,7 +30,7 @@ on:
 jobs:
     release:
         name: Version, Publish & Release
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.runner }}
 
         permissions:
             contents: write

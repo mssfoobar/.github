@@ -31,6 +31,9 @@ jobs:
   review:
     uses: ./.github/workflows/claude-code-review.yml
     with:
+      # This repository is public, so it must never run on the self-hosted fleet:
+      # a fork PR would execute its code there. The reusable default is arc-runner.
+      runner: ubuntu-latest
       # Do NOT fall back to the OAuth token here. It exists at the org level, so
       # the fallback would happily select it — and then the action fails red with
       # "your organization has disabled Claude subscription access", turning

@@ -3,6 +3,11 @@ name: SonarQube Scan
 on:
     workflow_call:
         inputs:
+            runner:
+                required: false
+                type: string
+                default: 'arc-runner'
+                description: "Runner label. Defaults to the self-hosted arc-runner scale set. Pass ubuntu-latest only when calling from a public repository."
             project_base_dir:
                 required: true
                 type: string
@@ -13,7 +18,7 @@ permissions:
 jobs:
     sonar-scan:
         name: "SonarQube static Analysis"
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.runner }}
 
         steps:
             - name: "Checkout code"

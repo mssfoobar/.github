@@ -42,8 +42,8 @@ on:
             runner: 
                 required: false
                 type: string
-                default: 'ubuntu-latest'
-                description: 'Runner label to execute on. Defaults to GitHub-hosted ubuntu-latest; set to a self-hosted scale-set label (e.g. "arc-runner") to run the check on self-hosted runners.'
+                default: 'arc-runner'
+                description: "Runner label. Defaults to the self-hosted arc-runner scale set. Pass ubuntu-latest only when calling from a public repository."
 
         secrets:
             DEPLOYMENT_APP_ID:

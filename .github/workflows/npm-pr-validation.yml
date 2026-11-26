@@ -11,6 +11,11 @@ name: NPM PR Validation
 on:
   workflow_call:
     inputs:
+      runner:
+        required: false
+        type: string
+        default: 'arc-runner'
+        description: "Runner label. Defaults to the self-hosted arc-runner scale set. Pass ubuntu-latest only when calling from a public repository."
       package-manager:
         required: false
         type: string
@@ -87,7 +92,7 @@ on:
 jobs:
   validate:
     name: Validate
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 10
     # Be self-sufficient about token scope rather than inheriting from the
     # caller. Many consumer workflows don't declare `packages: read` (or run
