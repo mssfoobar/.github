@@ -28,6 +28,11 @@ name: NPM Stable Publish
 on:
   workflow_call:
     inputs:
+      runner:
+        required: false
+        type: string
+        default: 'arc-runner'
+        description: "Runner label. Defaults to the self-hosted arc-runner scale set. Pass ubuntu-latest only when calling from a public repository."
       release-script:
         required: false
         type: string
@@ -69,7 +74,7 @@ on:
 jobs:
   publish:
     name: Publish stable
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 10
     permissions:
       contents: write

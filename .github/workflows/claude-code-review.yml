@@ -78,8 +78,8 @@ on:
       runner:
         required: false
         type: string
-        default: 'ubuntu-latest'
-        description: 'Runner label. Defaults to GitHub-hosted ubuntu-latest; set to a self-hosted scale-set label (e.g. "arc-runner") where GitHub-hosted runners are unavailable.'
+        default: 'arc-runner'
+        description: "Runner label. Defaults to the self-hosted arc-runner scale set. Pass ubuntu-latest only when calling from a public repository."
       model:
         required: false
         type: string
