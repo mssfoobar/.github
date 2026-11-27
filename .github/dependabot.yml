@@ -14,14 +14,25 @@ updates:
     directories:
       - /
       - /.github/actions/*
+    # Monday 08:30 Singapore time, with ops-hub's other dependency PRs.
     schedule:
       interval: weekly
+      day: monday
+      time: "08:30"
+      timezone: Asia/Singapore
+    open-pull-requests-limit: 2
     cooldown:
       default-days: 7
+    # One PR a week for every action, majors included (one PR per major used
+    # to wait here unmerged for weeks), and one for security fixes once those
+    # are switched on.
     groups:
-      actions-minor-patch:
-        update-types:
-          - minor
-          - patch
+      actions:
+        patterns:
+          - "*"
+      actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
     commit-message:
       prefix: chore(deps)
